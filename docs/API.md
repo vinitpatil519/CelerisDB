@@ -74,7 +74,10 @@ This mode applies when `cluster.voters` is set (D-018). Data goes through
 the Raft group of the key's replica set.
 
 * **Before any map is committed:** data requests return
-  `503 no_partition_map`. Run `celeris cluster rebalance --rf N`.
+  `503 no_partition_map`. The control-plane leader commits the first map
+  on its own once every voter is alive (`cluster.replication_factor`,
+  default 3); with `replication_factor = 0`, run
+  `celeris cluster rebalance --rf N` once.
 * **Writes:** only the group leader accepts writes; other replicas answer
   `421 not_leader` with `leader` and `replicas`. Successful writes return
   `celeris-session-index` (a token `<index>@<group>`). Errors:
@@ -231,7 +234,7 @@ The stream follows these rules:
 | `GET /v1/partitions/key/{key}` | `{partition, partition_epoch, map_epoch, replicas, leader}` for a key. Lets clients route directly to owners. See [PARTITIONING.md](PARTITIONING.md) |
 | `GET /metrics` | Prometheus text format |
 | `POST /v1/admin/shutdown` | Graceful stop. **Loopback clients only** until authentication lands (M9) |
-| `POST /v1/admin/rebalance` | `{"replication_factor": N}`: proposes placing partitions on the current membership through the Raft control plane. Loopback only; accepted only by the Raft leader (`202 {"log_index"}`), otherwise `409 not_leader` naming the leader. `/v1/status.control.raft` shows role, term, leader and commit index |
+| `POST /v1/admin/rebalance` | `{"replication_factor": N}`: proposes placing partitions on the current membership through the Raft control plane. Loopback only. The leader answers `202 {"status":"proposed","log_index"}`; a follower forwards the request to the leader and answers `202 {"status":"forwarded","leader"}`; `409 not_leader` only while no leader is known. `/v1/status.control.raft` shows role, term, leader and commit index |
 
 ## Metrics
 

@@ -93,6 +93,11 @@ pub struct ClusterConfig {
     /// set of live members has differed from the placement, unchanged, for
     /// this long. 0 disables it (rebalance only on request).
     pub auto_rebalance_after_ms: u64,
+    /// Replicas per partition for the first placement, which the
+    /// control-plane leader proposes on its own once every voter is alive
+    /// (capped at the number of nodes). 0 disables automatic bootstrap; then
+    /// run `celeris cluster rebalance --rf N` once.
+    pub replication_factor: u8,
     /// How often each group leader verifies that its replicas hold
     /// identical data (and repairs diverged ones). 0 disables it.
     pub anti_entropy_interval_ms: u64,
@@ -114,6 +119,7 @@ impl Default for ClusterConfig {
             raft_heartbeat_ms: 250,
             snapshot_threshold: 10_000,
             auto_rebalance_after_ms: 30_000,
+            replication_factor: 3,
             anti_entropy_interval_ms: 60_000,
         }
     }
@@ -213,6 +219,11 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect();
+        }
+        if let Some(v) = get("CELERIS_REPLICATION_FACTOR") {
+            self.cluster.replication_factor = v
+                .parse()
+                .with_context(|| format!("CELERIS_REPLICATION_FACTOR must be 0-255, got `{v}`"))?;
         }
         if let Some(v) = get("CELERIS_HTTP_LISTEN") {
             self.http.listen = v;
@@ -371,6 +382,10 @@ zone = "default"
 # Node IDs of the control-plane (Raft) voters, fixed at bootstrap; use 3 or 5.
 # Each voter should set [node] id so its ID is known in advance. [CELERIS_CLUSTER_VOTERS]
 # voters = ["node-a", "node-b", "node-c"]
+# Replicas per partition. Once every voter is up, the control-plane leader
+# places partitions with this many replicas (capped at the node count).
+# 0 = wait for `celeris cluster rebalance --rf N`. [CELERIS_REPLICATION_FACTOR]
+# replication_factor = 3
 
 [storage]
 # "always": fsync every write before acknowledging it (survives power loss).

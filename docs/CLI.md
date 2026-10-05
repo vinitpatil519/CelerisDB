@@ -23,7 +23,7 @@ Global flags:
 | `celeris mutation <uuid>` | Did this mutation commit? |
 | `celeris conflicts list [--prefix p] [--limit N]` | Writes that lost last-writer-wins in `available` mode |
 | `celeris conflicts clear <key>` | Forget a key's recorded conflicts |
-| `celeris cluster rebalance --rf N` | Place partitions on the current members (run against the control-plane leader) |
+| `celeris cluster rebalance --rf N` | Place partitions on the current members (any voter; followers forward to the leader) |
 | `celeris partitions [--key K]` | Partition map summary, or the partition, epoch and replicas for one key |
 | `celeris doctor [--config celeris.toml]` | Check config, data dir, storage lock, port and node health |
 | `celeris bench [--workload put\|get\|mixed] [--ops N] [-c N] [--value-size B] [--keys N]` | Measure p50/p95/p99 latency and throughput (alias: `benchmark`) |
@@ -98,7 +98,9 @@ CELERIS_NODE_ID=a CELERIS_CLUSTER_LISTEN=127.0.0.1:7000 \
 CELERIS_NODE_ID=b CELERIS_HTTP_LISTEN=127.0.0.1:8081 CELERIS_CLUSTER_LISTEN=127.0.0.1:7001 \
   CELERIS_CLUSTER_SEEDS=127.0.0.1:7000 CELERIS_CLUSTER_VOTERS=a,b,c celeris start --config b/celeris.toml
 celeris node list
-celeris --addr <control leader> cluster rebalance --rf 3
+# The leader places partitions on its own once a, b and c are all up
+# (cluster.replication_factor, default 3). To re-place them later:
+celeris cluster rebalance --rf 3
 ```
 
 From then on every write goes through the Raft group of its key's replica

@@ -225,6 +225,50 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-025 Automatic first placement; admin requests forwarded to the leader
+
+Found while running the 3-node compose cluster: a fresh cluster served
+nothing (`503 no_partition_map`) until an operator ran
+`celeris cluster rebalance` on the control-plane leader's own machine
+(admin endpoints accept loopback only). In containers that meant finding
+the leader and `docker exec`-ing into it.
+
+* **Bootstrap:** the control-plane leader proposes the first placement on
+  its own once *every* configured voter is a live member, with
+  `cluster.replication_factor` replicas (default 3, capped at the node
+  count). Waiting for all voters avoids placing everything on the first
+  quorum and immediately migrating. It proposes at most once per term.
+  `replication_factor = 0` restores the manual step.
+* **Forwarding:** `POST /v1/admin/rebalance` on a follower is validated
+  locally and forwarded to the leader over the cluster port
+  (`202 "forwarded"`). The leader's state machine checks it again.
+
+## D-024 Pooled node-to-node connections
+
+The cluster transport opened one TCP connection per frame. Every Raft
+heartbeat, group append and gossip ping left a socket in `TIME_WAIT` on the
+sender. With many groups (or several nodes on one host) this exhausted the
+ephemeral port range: on Windows with Docker running, which reserves part
+of the range, connects failed with `WSAEADDRINUSE` and cluster tests timed
+out.
+
+* Frames up to 256 KiB share one long-lived connection per peer, written
+  in order by a writer task with a bounded queue (1024 frames). When the
+  queue is full, frames are dropped; Raft and gossip resend what matters.
+  A failed write drops that frame and reconnects. The writer closes the
+  connection after 20 s idle; the receiver closes after 60 s, so it never
+  closes a connection the sender is about to use.
+* Bulky frames (large appends) still get a connection of their own, so a
+  4 MiB append does not delay heartbeats. Graceful-leave notices also use
+  their own connections and are awaited before shutdown.
+* The receiver reads frames until the sender closes the connection and
+  handles each frame in its own task, as before. It holds only a weak
+  reference to the node, so a stopped node releases its storage at once.
+* Compatibility: an older sender sends one frame per connection, which the
+  new receiver handles. An older receiver reads only the first frame, so a
+  rolling upgrade loses some frames until every node runs the new version.
+  Raft and gossip retransmit, so this only delays them.
+
 ## D-023 AVAILABLE mode: local accept, ordered reconciliation, surfaced conflicts, anti-entropy
 
 `available` and `eventual` writes must succeed while a client can reach

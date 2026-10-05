@@ -52,6 +52,13 @@ pub(crate) struct ControlPlane {
     /// from the placement, and since when (node clock, ms).
     auto_rebalance: Option<(Vec<NodeId>, u64)>,
     auto_rebalance_after_ms: u64,
+    /// The voters, fixed at bootstrap.
+    voters: Vec<NodeId>,
+    /// Replication factor for the automatic first placement (0: off).
+    bootstrap_rf: u8,
+    /// The term in which this node last proposed the first placement, so
+    /// it proposes at most once per term.
+    bootstrap_term: Option<u64>,
 }
 
 /// How replication groups are created on this node.
@@ -214,8 +221,14 @@ impl Node {
                         ..RaftConfig::default()
                     };
                     let seed = Uuid::new_v4().as_u64_pair().0;
-                    let mut raft =
-                        Raft::restore(id.clone(), voters, raft_config, seed, 0, state.clone());
+                    let mut raft = Raft::restore(
+                        id.clone(),
+                        voters.clone(),
+                        raft_config,
+                        seed,
+                        0,
+                        state.clone(),
+                    );
                     raft.restore_commit(known_commit);
                     info!(node_id = %id, term = state.term, log_entries = state.log.len(), known_commit, "control plane voter");
                     Some(Mutex::new(ControlPlane {
@@ -232,6 +245,9 @@ impl Node {
                         },
                         auto_rebalance: None,
                         auto_rebalance_after_ms: c.auto_rebalance_after_ms,
+                        voters,
+                        bootstrap_rf: c.replication_factor,
+                        bootstrap_term: None,
                     }))
                 } else {
                     info!(node_id = %id, "not a control-plane voter");
@@ -630,13 +646,16 @@ impl Node {
         let Some(control) = &self.control else {
             return Vec::new();
         };
-        if !self.map_committed.load(Ordering::Acquire) || !self.migrations().is_empty() {
-            return Vec::new();
-        }
         let Some(mut nodes) = self.with_membership(|m, _| m.placement_nodes()) else {
             return Vec::new();
         };
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        if !self.map_committed.load(Ordering::Acquire) {
+            return self.bootstrap_placement(control, nodes);
+        }
+        if !self.migrations().is_empty() {
+            return Vec::new();
+        }
         let wanted: Vec<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
         let map = self.partitions();
         let mut placed: Vec<NodeId> = map.nodes().iter().map(|n| n.id.clone()).collect();
@@ -677,6 +696,47 @@ impl Node {
             nodes = nodes.len(),
             replication_factor = rf,
             "proposing automatic rebalance"
+        );
+        let command = ControlCommand::SetNodes {
+            nodes,
+            replication_factor: rf,
+        };
+        match self.with_raft(|raft, _| match raft.propose(command) {
+            Ok((_, out)) => ((), out),
+            Err(_) => ((), Vec::new()),
+        }) {
+            Some(Ok(((), out))) => out,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Proposes the first placement once every voter is a live member, on
+    /// the control-plane leader, at most once per term. Without it an
+    /// operator runs `celeris cluster rebalance` once. Blocking.
+    fn bootstrap_placement(
+        &self,
+        control: &Mutex<ControlPlane>,
+        nodes: Vec<NodeInfo>,
+    ) -> Vec<Envelope<ControlCommand>> {
+        let rf = {
+            let mut cp = control.lock().unwrap_or_else(PoisonError::into_inner);
+            let term = cp.raft.term();
+            let all_voters_alive = cp.voters.iter().all(|v| nodes.iter().any(|n| &n.id == v));
+            if cp.bootstrap_rf == 0
+                || cp.raft.role() != Role::Leader
+                || cp.bootstrap_term == Some(term)
+                || !all_voters_alive
+            {
+                return Vec::new();
+            }
+            cp.bootstrap_term = Some(term);
+            cp.bootstrap_rf
+                .min(u8::try_from(nodes.len()).unwrap_or(u8::MAX))
+        };
+        info!(
+            nodes = nodes.len(),
+            replication_factor = rf,
+            "every voter is up; proposing the first partition placement"
         );
         let command = ControlCommand::SetNodes {
             nodes,

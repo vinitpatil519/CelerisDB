@@ -13,6 +13,11 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+/// Each test runs three or more nodes with tight timeouts; running every
+/// test at once overloads small machines and CI runners, so at most a few
+/// run concurrently.
+static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+
 struct RunningNode {
     http: SocketAddr,
     cluster: SocketAddr,
@@ -26,7 +31,10 @@ async fn start(seed: Option<SocketAddr>) -> RunningNode {
 }
 
 async fn start_voter(seed: Option<SocketAddr>, id: Option<&str>, voters: &[&str]) -> RunningNode {
-    let config = test_config(seed, id, voters);
+    start_with(test_config(seed, id, voters)).await
+}
+
+async fn start_with(config: Config) -> RunningNode {
     let http_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind http");
     let cluster_listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -52,6 +60,8 @@ fn test_config(seed: Option<SocketAddr>, id: Option<&str>, voters: &[&str]) -> C
     config.cluster.voters = voters.iter().map(|v| (*v).to_owned()).collect();
     config.cluster.raft_election_timeout_ms = 150;
     config.cluster.raft_heartbeat_ms = 30;
+    // Tests place partitions explicitly unless they test the bootstrap.
+    config.cluster.replication_factor = 0;
     config
 }
 
@@ -159,6 +169,7 @@ fn states(entries: &[(&RunningNode, &str)]) -> Vec<(String, String)> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_nodes_join_leave_and_detect_a_crash() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let a = start(None).await;
     let mut b = start(Some(a.cluster)).await;
     let c = start(Some(a.cluster)).await;
@@ -271,6 +282,7 @@ fn header(head: &str, name: &str) -> Option<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replicated_writes_survive_leader_failure() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let voters = ["ra", "rb", "rc"];
     let a = start_voter(None, Some("ra"), &voters).await;
     let b = start_voter(Some(a.cluster), Some("rb"), &voters).await;
@@ -467,6 +479,7 @@ async fn crash_and_restart(node: RunningNode, config: Config) -> RunningNode {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lagging_replica_catches_up_from_a_snapshot() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(tracing::Level::WARN)
@@ -617,6 +630,7 @@ async fn running_migrations(n: SocketAddr) -> u64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn partitions_move_with_their_data_when_placement_changes() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let voters = ["ma", "mb", "mc"];
     let a = start_voter(None, Some("ma"), &voters).await;
     let b = start_voter(Some(a.cluster), Some("mb"), &voters).await;
@@ -718,6 +732,7 @@ async fn partitions_move_with_their_data_when_placement_changes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lost_node_is_rebalanced_away_automatically_without_losing_data() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let voters = ["xa", "xb", "xc"];
     let launch_new = async |seed: Option<SocketAddr>, id: &str| {
         let mut config = test_config(seed, Some(id), &voters);
@@ -783,6 +798,7 @@ async fn a_lost_node_is_rebalanced_away_automatically_without_losing_data() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn available_writes_survive_quorum_loss_and_conflicts_are_surfaced() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let voters = ["va1", "va2", "va3"];
     let mut nodes = Vec::new();
     for id in voters {
@@ -948,6 +964,7 @@ async fn available_writes_survive_quorum_loss_and_conflicts_are_surfaced() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn anti_entropy_compares_every_replica() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let voters = ["ea", "eb", "ec"];
     let mut nodes = Vec::new();
     for id in voters {
@@ -1051,6 +1068,7 @@ async fn try_request(addr: SocketAddr, method: &str, path: &str, body: &str) -> 
 /// operations must be linearizable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn strict_operations_stay_linearizable_across_leader_failure() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     use celeris_testkit::linearizability::{Event, Op, check};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
@@ -1199,6 +1217,7 @@ async fn raft_role(n: &RunningNode) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn control_plane_elects_a_leader_and_commits_partition_maps() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
     let voters = ["va", "vb", "vc"];
     let a = start_voter(None, Some("va"), &voters).await;
     let b = start_voter(Some(a.cluster), Some("vb"), &voters).await;
@@ -1232,23 +1251,19 @@ async fn control_plane_elects_a_leader_and_commits_partition_maps() {
         }
     }
     let (leader, follower) = (leader.expect("leader"), follower.expect("follower"));
+    assert_eq!(raft_role(leader).await, "leader");
 
-    let (code, body) = post(
-        follower.http,
-        "/v1/admin/rebalance",
-        r#"{"replication_factor":2}"#,
-    )
+    // A follower forwards the request to the leader.
+    wait_until("the follower forwards the rebalance", async || {
+        let (code, body) = post(
+            follower.http,
+            "/v1/admin/rebalance",
+            r#"{"replication_factor":2}"#,
+        )
+        .await;
+        code == 202 && body["status"] == "forwarded"
+    })
     .await;
-    assert_eq!(code, 409, "{body}");
-    assert_eq!(body["error"]["code"], "not_leader");
-
-    let (code, body) = post(
-        leader.http,
-        "/v1/admin/rebalance",
-        r#"{"replication_factor":2}"#,
-    )
-    .await;
-    assert_eq!(code, 202, "{body}");
 
     for n in nodes {
         wait_until("every node applies the committed map", async || {
@@ -1266,6 +1281,40 @@ async fn control_plane_elects_a_leader_and_commits_partition_maps() {
     let route: Value = serde_json::from_str(&route).expect("json");
     assert_eq!(route["replicas"].as_array().map(Vec::len), Some(2));
     for n in nodes {
+        n.task.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_leader_places_partitions_once_every_voter_is_up() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
+    let voters = ["ba", "bb", "bc"];
+    let config = |seed, id| {
+        let mut config = test_config(seed, Some(id), &voters);
+        config.cluster.replication_factor = 3;
+        config
+    };
+    let a = start_with(config(None, "ba")).await;
+    // Two of three voters form a quorum but must not place partitions yet:
+    // the third would start with no replicas.
+    let b = start_with(config(Some(a.cluster), "bb")).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let p: Value = serde_json::from_str(&get(a.http, "/v1/partitions").await).expect("json");
+    assert_ne!(p["nodes"].as_array().map(Vec::len), Some(2), "{p}");
+
+    let c = start_with(config(Some(a.cluster), "bc")).await;
+    for n in [&a, &b, &c] {
+        wait_until("every node applies the automatic placement", async || {
+            let p: Value =
+                serde_json::from_str(&get(n.http, "/v1/partitions").await).expect("json");
+            p["replication_factor"] == 3 && p["nodes"].as_array().map(Vec::len) == Some(3)
+        })
+        .await;
+    }
+    let nodes = [a.http, b.http, c.http];
+    let (_, body) = put_anywhere(&nodes, "boot/1", r#"{"ok":true}"#).await;
+    assert!(body["version"].as_u64().is_some(), "{body}");
+    for n in [a, b, c] {
         n.task.abort();
     }
 }

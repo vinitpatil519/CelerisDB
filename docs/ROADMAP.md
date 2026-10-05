@@ -51,7 +51,7 @@ Follow-ups:
 
 Follow-ups:
 
-* [ ] WebSocket change stream (pulled forward from M7 if the website demo needs it).
+* [x] WebSocket change stream (see M7).
 * [ ] Request size and rate limits per client (M9 security).
 
 ## M3 — Partitioning: done
@@ -221,15 +221,31 @@ Not done: version vectors. Per-key hybrid timestamps plus
 "observed version" detection cover conflict detection for single-key
 writes.
 
-## M7 — Developer platform
+## M7 — Developer platform: done
 
-TypeScript SDK first, then Python, Rust, Go. WebSocket change streams.
-`useCeleris()` React hook.
+* WebSocket change stream (`GET /v1/watch?prefix=`): per-node,
+  best-effort, from "now", with `lagged` notices and a `hello` that says
+  whether the node covers every replica set.
+* SDKs, each tested against a real node (Go also against the 3-node compose
+  cluster):
+  * TypeScript (`sdks/typescript`), with `createKeyStore` and the
+    `useCeleris()` React hook;
+  * Python (`sdks/python`), standard library only;
+  * Rust (`sdks/rust`), async;
+  * Go (`sdks/go`), standard library only.
+* Shared guarantees: mutation-ID retries, redirect following, session
+  tokens, and unknown outcomes reported as such.
+
+Not done: resumable change streams (from a log position).
 
 ## M8 — Deployment and website
 
-Dockerfile and 3-node `docker compose`; Kubernetes StatefulSet (kind/k3d);
-AWS reference (EC2/EBS/EKS, optional). Landing page: React, GSAP, Lenis, SVG.
+* [x] Dockerfile (multi-stage, non-root, tini) and 3-node `docker compose`
+  that bootstraps itself (D-025); CI builds it and checks replication.
+* [ ] Kubernetes StatefulSet (kind/k3d).
+* [ ] AWS reference (EC2/EBS/EKS, optional).
+* [ ] Admin console.
+* [ ] Landing page: React, GSAP, Lenis, SVG.
 
 ## M9 — Hardening
 

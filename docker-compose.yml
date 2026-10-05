@@ -1,0 +1,58 @@
+# A 3-node Celeris cluster on one machine.
+#
+#   docker compose up -d --build
+#   celeris --addr http://127.0.0.1:8081 cluster   # or curl localhost:8081/v1/status
+#
+# Each node keeps its data in its own named volume, so `docker compose down`
+# keeps data and `docker compose down -v` erases it.
+
+x-node: &node
+  build: .
+  image: celeris:local
+  restart: unless-stopped
+  environment: &env
+    CELERIS_CLUSTER_LISTEN: 0.0.0.0:7000
+    CELERIS_CLUSTER_SEEDS: node-a:7000,node-b:7000,node-c:7000
+    CELERIS_CLUSTER_VOTERS: node-a,node-b,node-c
+    # Writes are acknowledged by a Raft majority; keep fsync on in production.
+    CELERIS_SYNC: always
+    CELERIS_CORS_ORIGINS: http://localhost:5173,http://localhost:4173
+
+services:
+  node-a:
+    <<: *node
+    hostname: node-a
+    environment:
+      <<: *env
+      CELERIS_NODE_ID: node-a
+      CELERIS_CLUSTER_ADVERTISE: node-a:7000
+      CELERIS_ZONE: zone-a
+    ports: ["8081:8080"]
+    volumes: ["node-a:/var/lib/celeris/data"]
+
+  node-b:
+    <<: *node
+    hostname: node-b
+    environment:
+      <<: *env
+      CELERIS_NODE_ID: node-b
+      CELERIS_CLUSTER_ADVERTISE: node-b:7000
+      CELERIS_ZONE: zone-b
+    ports: ["8082:8080"]
+    volumes: ["node-b:/var/lib/celeris/data"]
+
+  node-c:
+    <<: *node
+    hostname: node-c
+    environment:
+      <<: *env
+      CELERIS_NODE_ID: node-c
+      CELERIS_CLUSTER_ADVERTISE: node-c:7000
+      CELERIS_ZONE: zone-c
+    ports: ["8083:8080"]
+    volumes: ["node-c:/var/lib/celeris/data"]
+
+volumes:
+  node-a:
+  node-b:
+  node-c:

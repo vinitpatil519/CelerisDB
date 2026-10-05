@@ -1008,9 +1008,10 @@ struct RebalanceRequest {
     replication_factor: u8,
 }
 
-/// Proposes placing partitions on the current membership. Accepted only
-/// by the Raft leader; the new map takes effect on every node once the
-/// command commits (watch `/v1/partitions` for the epoch to change).
+/// Proposes placing partitions on the current membership. A follower
+/// forwards the request to the Raft leader (`"status": "forwarded"`); the
+/// new map takes effect on every node once the command commits (watch
+/// `/v1/partitions` for the epoch to change).
 async fn rebalance(
     State(node): State<AppState>,
     peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
@@ -1033,6 +1034,15 @@ async fn rebalance(
             Ok((
                 StatusCode::ACCEPTED,
                 Json(json!({ "status": "proposed", "log_index": index })),
+            )
+                .into_response())
+        }
+        Err(ProposeError::NotLeader(Some(leader)))
+            if crate::cluster::forward_rebalance(&node, &leader, rf) =>
+        {
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({ "status": "forwarded", "leader": leader })),
             )
                 .into_response())
         }

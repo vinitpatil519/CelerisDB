@@ -14,15 +14,9 @@ fixed for the whole database.
 
 ## Status
 
-Early development. **A single node is usable today:**
-
-* storage engine
-* HTTP/JSON API
-* `celeris` CLI
-* Prometheus metrics
-
-Clustering, replication, SDKs and the website are not built yet. See
-[docs/ROADMAP.md](docs/ROADMAP.md).
+Pre-1.0. Single nodes and replicated clusters both work, with SDKs for
+TypeScript (plus a React hook), Python, Rust and Go. See
+[docs/ROADMAP.md](docs/ROADMAP.md) for what is left.
 
 | Milestone | State |
 |---|---|
@@ -30,8 +24,12 @@ Clustering, replication, SDKs and the website are not built yet. See
 | 1. Storage engine: WAL, memtable, SSTables, bloom, block cache, compaction, TTL, crash recovery | done |
 | 2. HTTP API + CLI + metrics | done |
 | 3. Partitioning: 4096 partitions, zone-aware rendezvous placement, epochs | done |
-| 4. Membership, failure detection, replication | in progress: membership + failure detection done |
-| 5–9. Strict/available modes, SDKs, deploy, chaos | planned |
+| 4. Membership, Raft control plane, per-replica-set Raft groups, snapshots, migration, rebalancing | done |
+| 5. STRICT mode, checked by a linearizability checker under leader failure | done |
+| 6. AVAILABLE / EVENTUAL modes: local accept, reconciliation, conflicts, anti-entropy | done |
+| 7. SDKs (TypeScript + React, Python, Rust, Go) and WebSocket change streams | done |
+| 8. Docker, compose, Kubernetes, website | in progress: Docker image and 3-node compose done |
+| 9. Hardening: auth, TLS, backup/restore, benchmarks | planned |
 
 ## Quick start
 
@@ -64,6 +62,31 @@ curl localhost:8080/metrics
 
 API reference: [docs/API.md](docs/API.md). CLI reference: [docs/CLI.md](docs/CLI.md).
 
+### A 3-node cluster with Docker
+
+```bash
+docker compose up -d --build        # nodes on localhost:8081, 8082, 8083
+curl -X PUT localhost:8081/v1/kv/hello -d '"world"'
+```
+
+Once every voter is up, the control-plane leader places partitions with
+three replicas on its own (`cluster.replication_factor`). Writes go through
+the Raft group of the key's replica set; a replica that does not lead the
+group answers `421 not_leader`, which the SDKs follow automatically.
+
+### SDKs
+
+| Language | Path | Highlights |
+|---|---|---|
+| TypeScript | [sdks/typescript](sdks/typescript) | browsers and Node.js, `useCeleris()` React hook |
+| Python | [sdks/python](sdks/python) | standard library only |
+| Rust | [sdks/rust](sdks/rust) | async (`tokio`), typed values via serde |
+| Go | [sdks/go](sdks/go) | standard library only |
+
+Every SDK retries writes with the same mutation ID, follows redirects,
+tracks session tokens, and reports an *unknown outcome* instead of a
+failure when a write may have committed.
+
 ## Repository layout
 
 ```text
@@ -73,7 +96,13 @@ crates/
   celeris-cluster/   SWIM-style membership + failure detection (sans-IO, simulation-tested)
   celeris-server/    node runtime: HTTP/JSON API, config, Prometheus metrics
   celeris-cli/       the `celeris` binary: init/start/stop/status/put/get/scan/doctor/bench
-  celeris-testkit/   failure-injection harnesses (kill-during-write crash test)
+  celeris-testkit/   failure-injection harnesses, linearizability checker
+sdks/
+  typescript/        @celeris/client (+ React hook)
+  python/            celeris-client
+  rust/              celeris-client crate (workspace member)
+  go/                Go module
+Dockerfile, docker-compose.yml   container image and a local 3-node cluster
 docs/
   API.md             HTTP API contract, error model, metrics
   CLI.md             commands, exit codes, retry semantics, env vars

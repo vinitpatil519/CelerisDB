@@ -33,3 +33,59 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+
+  sdks:
+    name: SDKs (TypeScript, Python, Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p celeris-cli
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: TypeScript SDK
+        working-directory: sdks/typescript
+        run: npm ci && npm test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python SDK
+        working-directory: sdks/python
+        run: pip install pytest && python -m pytest -q
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Go SDK
+        working-directory: sdks/go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          CELERIS_HTTP_LISTEN=127.0.0.1:8080 CELERIS_SYNC=never CELERIS_DATA_DIR="$RUNNER_TEMP/celeris" \
+            ../../target/release/celeris start &
+          for i in $(seq 1 50); do curl -sf localhost:8080/health && break; sleep 0.2; done
+          CELERIS_URL=http://127.0.0.1:8080 go test -count=1 ./...
+
+  docker:
+    name: Docker image and 3-node compose cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d --build
+      - name: The cluster places partitions and replicates writes
+        run: |
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT localhost:8081/v1/kv/ci -d '{"ok":true}')
+            [ "$code" = 200 ] && break
+            sleep 1
+          done
+          test "$code" = 200
+          # Another replica applies the committed write shortly after.
+          for i in $(seq 1 20); do
+            curl -sf "localhost:8083/v1/kv/ci?consistency=eventual" && exit 0
+            sleep 0.5
+          done
+          exit 1
+      - if: failure()
+        run: docker compose logs

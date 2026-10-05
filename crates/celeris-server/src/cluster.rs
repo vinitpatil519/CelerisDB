@@ -55,6 +55,14 @@ const MAX_FRAME_BYTES: usize = 128 * 1024 * 1024;
 /// Frames above this size are encoded and decoded on the blocking pool.
 const BULKY_FRAME_BYTES: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
+/// A pooled connection to a peer closes after this long without frames.
+/// The receiving side waits longer, so it never closes a connection the
+/// sender is about to use.
+const POOL_IDLE: Duration = Duration::from_secs(20);
+const INBOUND_IDLE: Duration = Duration::from_secs(60);
+/// Frames queued per peer; beyond this new frames are dropped (Raft and
+/// gossip resend what matters).
+const POOL_QUEUE: usize = 1024;
 const SNAPSHOT_MAGIC: &[u8; 4] = b"CLSN";
 /// Current snapshot stream version.
 pub const SNAPSHOT_STREAM_VERSION: u8 = 1;
@@ -318,6 +326,20 @@ async fn read_snapshot<R: AsyncReadExt + Unpin>(
     Ok((header, data))
 }
 
+/// Reads the next frame of a pooled connection. `None` when the sender
+/// closed it, or it stayed idle for `INBOUND_IDLE`.
+async fn read_next_frame(stream: &mut TcpStream) -> anyhow::Result<Option<Frame>> {
+    let mut magic = [0u8; 4];
+    match tokio::time::timeout(INBOUND_IDLE, stream.read_exact(&mut magic)).await {
+        Err(_) => return Ok(None),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Ok(Err(e)) => return Err(e.into()),
+        Ok(Ok(_)) => {}
+    }
+    anyhow::ensure!(&magic == MAGIC, "not a Celeris cluster frame");
+    Ok(Some(read_frame_after_magic(stream).await?))
+}
+
 /// Reads one inbound connection: a frame (timeout scaled to its size) or a
 /// snapshot stream (long timeout).
 async fn read_inbound(stream: &mut TcpStream) -> anyhow::Result<Inbound> {
@@ -507,6 +529,26 @@ pub(crate) async fn propose_control(node: &Arc<Node>, command: ControlCommand) {
     }
 }
 
+/// Forwards a placement request to the control-plane leader. The caller
+/// has validated it; the leader's state machine checks it again. Returns
+/// `false` if the leader's address is unknown.
+pub(crate) fn forward_rebalance(node: &Node, leader: &NodeId, rf: u8) -> bool {
+    let Some(addr) = node.member_addr(leader) else {
+        return false;
+    };
+    let Some(nodes) = node.with_membership(|m, _| m.placement_nodes()) else {
+        return false;
+    };
+    let frame = Frame::ControlPropose {
+        command: ControlCommand::SetNodes {
+            nodes,
+            replication_factor: rf,
+        },
+    };
+    tokio::spawn(send(addr, encode(&frame)));
+    true
+}
+
 async fn handle_snapshot(node: Arc<Node>, header: SnapshotHeader, data: Vec<u8>) {
     let Some(group) = node.group(&header.group) else {
         debug!(
@@ -592,7 +634,98 @@ fn transfer_timeout(bytes: usize) -> Duration {
     IO_TIMEOUT + Duration::from_millis((bytes / 4096) as u64)
 }
 
+/// Per-peer senders of the connection pool, by cluster address.
+static POOL: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Sends a frame to a peer, best-effort. Small frames share one long-lived
+/// connection per peer (in order), so heartbeats and gossip do not open a
+/// connection each, which would exhaust ephemeral ports with sockets in
+/// TIME_WAIT. Bulky frames get their own connection so they do not hold
+/// up the small ones.
 async fn send(addr: String, frame: Vec<u8>) {
+    if frame.len() > BULKY_FRAME_BYTES {
+        return send_direct(addr, frame).await;
+    }
+    let mut frame = frame;
+    for _ in 0..2 {
+        let tx = POOL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(addr.clone())
+            .or_insert_with(|| spawn_writer(addr.clone()))
+            .clone();
+        match tx.try_send(frame) {
+            Ok(()) => return,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                debug!(%addr, "cluster send queue full; dropping a frame");
+                return;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(f)) => {
+                // The writer exited (idle, or its runtime stopped): replace it.
+                frame = f;
+                let mut pool = POOL
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if pool.get(&addr).is_some_and(|t| t.same_channel(&tx)) {
+                    pool.remove(&addr);
+                }
+            }
+        }
+    }
+}
+
+/// Owns the pooled connection to one peer: connects on demand, writes
+/// queued frames in order, reconnects after an error (dropping the frame
+/// that failed), and exits when idle.
+fn spawn_writer(addr: String) -> tokio::sync::mpsc::Sender<Vec<u8>> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(POOL_QUEUE);
+    tokio::spawn(async move {
+        let mut stream: Option<TcpStream> = None;
+        while let Ok(Some(frame)) = tokio::time::timeout(POOL_IDLE, rx.recv()).await {
+            if stream.is_none() {
+                match tokio::time::timeout(IO_TIMEOUT, TcpStream::connect(&addr)).await {
+                    Ok(Ok(s)) => {
+                        let _ = s.set_nodelay(true);
+                        stream = Some(s);
+                    }
+                    Ok(Err(e)) => {
+                        debug!(%addr, error = %e, "cluster connect failed");
+                        continue;
+                    }
+                    Err(_) => {
+                        debug!(%addr, "cluster connect timed out");
+                        continue;
+                    }
+                }
+            }
+            if let Some(s) = stream.as_mut() {
+                let written =
+                    tokio::time::timeout(transfer_timeout(frame.len()), s.write_all(&frame)).await;
+                if !matches!(written, Ok(Ok(()))) {
+                    debug!(%addr, "cluster send failed; reconnecting");
+                    stream = None;
+                }
+            }
+        }
+        rx.close();
+        let mut pool = POOL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pool
+            .get(&addr)
+            .is_some_and(tokio::sync::mpsc::Sender::is_closed)
+        {
+            pool.remove(&addr);
+        }
+    });
+    tx
+}
+
+/// Sends a frame over a connection of its own and waits until it is
+/// written.
+async fn send_direct(addr: String, frame: Vec<u8>) {
     let result = tokio::time::timeout(transfer_timeout(frame.len()), async {
         let mut stream = TcpStream::connect(&addr).await?;
         stream.write_all(&frame).await?;
@@ -606,10 +739,10 @@ async fn send(addr: String, frame: Vec<u8>) {
     }
 }
 
-fn dispatch_membership(outs: Vec<celeris_cluster::Outgoing>) -> Vec<JoinHandle<()>> {
-    outs.into_iter()
-        .map(|o| tokio::spawn(send(o.addr, encode(&Frame::Membership(o.message)))))
-        .collect()
+fn dispatch_membership(outs: Vec<celeris_cluster::Outgoing>) {
+    for o in outs {
+        tokio::spawn(send(o.addr, encode(&Frame::Membership(o.message))));
+    }
 }
 
 /// Sends Raft messages to peers, addressed through the membership view.
@@ -767,7 +900,25 @@ pub(crate) async fn run(node: Arc<Node>, listener: TcpListener, mut stop: watch:
                     let node = Arc::clone(&node);
                     tokio::spawn(async move {
                         match read_inbound(&mut stream).await {
-                            Ok(Inbound::Frame(frame)) => handle_frame(node, frame).await,
+                            Ok(Inbound::Frame(frame)) => {
+                                // A pooled connection carries more frames. It
+                                // must not keep a stopped node alive.
+                                let weak = Arc::downgrade(&node);
+                                tokio::spawn(handle_frame(node, frame));
+                                loop {
+                                    match read_next_frame(&mut stream).await {
+                                        Ok(Some(frame)) => {
+                                            let Some(node) = weak.upgrade() else { break };
+                                            tokio::spawn(handle_frame(node, frame));
+                                        }
+                                        Ok(None) => break,
+                                        Err(e) => {
+                                            debug!(%peer, error = %e, "cluster connection closed");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             Ok(Inbound::Snapshot(header, data)) => {
                                 handle_snapshot(node, header, data).await;
                             }
@@ -787,10 +938,13 @@ pub(crate) async fn run(node: Arc<Node>, listener: TcpListener, mut stop: watch:
             }
         }
     }
-    let leaving = dispatch_membership(
-        node.with_membership(|m, now| m.leave(now))
-            .unwrap_or_default(),
-    );
+    // Delivered before returning, over connections of their own.
+    let leaving: Vec<JoinHandle<()>> = node
+        .with_membership(|m, now| m.leave(now))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|o| tokio::spawn(send_direct(o.addr, encode(&Frame::Membership(o.message)))))
+        .collect();
     for handle in leaving {
         let _ = handle.await;
     }
