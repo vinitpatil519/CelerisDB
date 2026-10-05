@@ -7,6 +7,7 @@ members = [
     "crates/celeris-server",
     "crates/celeris-cli",
     "crates/celeris-testkit",
+    "sdks/rust",
 ]
 
 [workspace.package]
@@ -14,7 +15,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
-repository = "https://github.com/celeris-db/celeris"
+repository = "https://github.com/vinitpatil519/CelerisDB"
 authors = ["Celeris contributors"]
 
 [workspace.dependencies]

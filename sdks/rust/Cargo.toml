@@ -1,0 +1,34 @@
+[package]
+name = "celeris-client"
+description = "Async Rust client for the Celeris distributed key-value / document database: per-request consistency, safe retries, scans, conflicts and live change streams."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+# HTTPS and WSS using rustls with the bundled Mozilla root certificates.
+rustls = ["reqwest/rustls-tls", "tokio-tungstenite/rustls-tls-webpki-roots"]
+
+[dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tokio-tungstenite = "0.29"
+uuid.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+celeris-server.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
