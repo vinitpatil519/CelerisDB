@@ -242,8 +242,10 @@ Not done: resumable change streams (from a log position).
 
 * [x] Dockerfile (multi-stage, non-root, tini) and 3-node `docker compose`
   that bootstraps itself (D-025); CI builds it and checks replication.
-* [ ] Kubernetes StatefulSet (kind/k3d).
-* [ ] AWS reference (EC2/EBS/EKS, optional).
+* [x] Kubernetes StatefulSet, headless Service, PodDisruptionBudget
+  (`deploy/kubernetes/celeris.yaml`); image published to GHCR on `v*` tags.
+  Not yet exercised on a live cluster in CI (kind).
+* [x] AWS reference architecture (EC2/EBS, EKS): `docs/DEPLOYMENT.md`.
 * [ ] Admin console.
 * [ ] Landing page: React, GSAP, Lenis, SVG.
 
