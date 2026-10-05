@@ -246,7 +246,8 @@ Not done: resumable change streams (from a log position).
   (`deploy/kubernetes/celeris.yaml`); image published to GHCR on `v*` tags.
   Not yet exercised on a live cluster in CI (kind).
 * [x] AWS reference architecture (EC2/EBS, EKS): `docs/DEPLOYMENT.md`.
-* [ ] Admin console.
+* [x] Admin console (`console/`): overview, partitions, data explorer with
+  compare-and-set, live change stream, conflicts.
 * [ ] Landing page: React, GSAP, Lenis, SVG.
 
 ## M9 — Hardening

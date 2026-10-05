@@ -67,6 +67,17 @@ jobs:
           for i in $(seq 1 50); do curl -sf localhost:8080/health && break; sleep 0.2; done
           CELERIS_URL=http://127.0.0.1:8080 go test -count=1 ./...
 
+  console:
+    name: Admin console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - working-directory: console
+        run: npm ci && npm run build
+
   docker:
     name: Docker image and 3-node compose cluster
     runs-on: ubuntu-latest

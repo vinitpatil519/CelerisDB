@@ -1,0 +1,85 @@
+import { useEffect, useState } from "react";
+
+import { useConnection } from "./connection";
+import { Conflicts } from "./pages/Conflicts";
+import { Explorer } from "./pages/Explorer";
+import { Live } from "./pages/Live";
+import { Overview } from "./pages/Overview";
+import { Partitions } from "./pages/Partitions";
+
+const PAGES = [
+  { id: "overview", label: "Overview", component: Overview },
+  { id: "partitions", label: "Partitions", component: Partitions },
+  { id: "explorer", label: "Data", component: Explorer },
+  { id: "live", label: "Live", component: Live },
+  { id: "conflicts", label: "Conflicts", component: Conflicts },
+] as const;
+
+type PageId = (typeof PAGES)[number]["id"];
+
+function currentPage(): PageId {
+  const id = window.location.hash.replace(/^#\/?/, "");
+  return (PAGES.find((p) => p.id === id)?.id ?? "overview") as PageId;
+}
+
+export function App() {
+  const [page, setPage] = useState<PageId>(currentPage);
+  useEffect(() => {
+    const onHash = () => setPage(currentPage());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const Page = PAGES.find((p) => p.id === page)!.component;
+
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <circle cx="16" cy="16" r="10" />
+            <circle cx="16" cy="16" r="3" className="dot" />
+          </svg>
+          <span>Celeris</span>
+          <small>console</small>
+        </div>
+        <nav aria-label="Sections">
+          {PAGES.map((p) => (
+            <a key={p.id} href={`#/${p.id}`} aria-current={p.id === page ? "page" : undefined}>
+              {p.label}
+            </a>
+          ))}
+        </nav>
+        <NodesForm />
+      </aside>
+      <main className="content">
+        <Page />
+      </main>
+    </div>
+  );
+}
+
+function NodesForm() {
+  const { nodes, setNodes } = useConnection();
+  const [text, setText] = useState(nodes.join("\n"));
+  return (
+    <form
+      className="nodes-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setNodes(text);
+      }}
+    >
+      <label htmlFor="nodes">Nodes</label>
+      <textarea
+        id="nodes"
+        rows={3}
+        spellCheck={false}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="http://127.0.0.1:8080"
+      />
+      <button type="submit">Connect</button>
+      <p className="hint">One API URL per line. Each node must allow this origin in http.cors_origins.</p>
+    </form>
+  );
+}

@@ -83,6 +83,9 @@ group answers `421 not_leader`, which the SDKs follow automatically.
 | Rust | [sdks/rust](sdks/rust) | async (`tokio`), typed values via serde |
 | Go | [sdks/go](sdks/go) | standard library only |
 
+An admin console ([console/](console)) shows nodes, Raft, partitions, data,
+live changes and conflicts in the browser: `cd console && npm install && npm run dev`.
+
 Every SDK retries writes with the same mutation ID, follows redirects,
 tracks session tokens, and reports an *unknown outcome* instead of a
 failure when a write may have committed.
@@ -102,6 +105,7 @@ sdks/
   python/            celeris-client
   rust/              celeris-client crate (workspace member)
   go/                Go module
+console/           browser admin console (React + Vite)
 Dockerfile, docker-compose.yml   container image and a local 3-node cluster
 deploy/kubernetes/ StatefulSet manifest
 docs/

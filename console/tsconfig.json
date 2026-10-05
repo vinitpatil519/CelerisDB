@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": false,
+    "paths": {
+      "@celeris/client": ["../sdks/typescript/src/index.ts"],
+      "@celeris/client/react": ["../sdks/typescript/src/react.ts"]
+    }
+  },
+  "include": ["src", "vite.config.ts"]
+}
