@@ -1,0 +1,30 @@
+[package]
+name = "celeris-cli"
+description = "The `celeris` command: run nodes, read and write data, diagnose, benchmark."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "celeris"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+celeris-core.workspace = true
+celeris-server.workspace = true
+clap.workspace = true
+humantime.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

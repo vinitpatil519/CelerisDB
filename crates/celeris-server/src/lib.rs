@@ -1,0 +1,22 @@
+//! A Celeris node: the HTTP/JSON client API on top of the storage engine.
+//!
+//! Browsers and SDKs talk HTTP/JSON only; they never see internal cluster
+//! protocols. See `docs/API.md` for the wire contract.
+
+mod anti_entropy;
+pub mod api;
+mod available;
+mod cluster;
+pub mod config;
+mod error;
+pub mod events;
+pub mod groups;
+mod metrics;
+mod migration;
+pub mod node;
+mod raft_log;
+mod replicated;
+
+pub use config::Config;
+pub use error::{ApiError, Outcome};
+pub use node::{Node, serve};

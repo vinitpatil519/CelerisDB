@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/celeris-core",
+    "crates/celeris-storage",
+    "crates/celeris-cluster",
+    "crates/celeris-server",
+    "crates/celeris-cli",
+    "crates/celeris-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/celeris-db/celeris"
+authors = ["Celeris contributors"]
+
+[workspace.dependencies]
+celeris-core = { path = "crates/celeris-core" }
+celeris-storage = { path = "crates/celeris-storage" }
+celeris-server = { path = "crates/celeris-server" }
+celeris-cluster = { path = "crates/celeris-cluster" }
+celeris-testkit = { path = "crates/celeris-testkit" }
+
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+crc32fast = "1"
+http-body-util = "0.1"
+humantime = "2"
+lru = "0.12"
+parking_lot = "0.12"
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "io-util"] }
+toml = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+ureq = { version = "2", default-features = false, features = ["json"] }
+tungstenite = "0.26"
+uuid = { version = "1", features = ["v4"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

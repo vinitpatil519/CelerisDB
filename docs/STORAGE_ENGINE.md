@@ -1,0 +1,168 @@
+# Storage engine (as implemented)
+
+Crate: `crates/celeris-storage`. Single-node, embedded, synchronous API.
+The server layer calls it from a blocking thread pool.
+
+## Write path
+
+```text
+Engine::write(batch)
+  ├─ validate keys / values / TTL / batch size
+  ├─ lock writer
+  ├─ mutation-ID dedupe lookup ─► already committed? return original version
+  ├─ evaluate conditions (Absent / Version) against current state
+  ├─ stall: too many immutable memtables? flush inline (before WAL append)
+  ├─ assign commit sequence number
+  ├─ append ONE WAL frame: all ops + dedupe record   ← atomicity point
+  ├─ fsync (SyncMode::Always)                        ← durability point
+  ├─ insert into memtable (visible to readers)
+  └─ memtable full? sync WAL, rotate to new WAL, schedule background flush
+```
+
+## Read path
+
+```text
+Engine::get(key)
+  memtable → immutable memtables (newest first)
+  → L0 tables (newest first; key-range check, bloom filter, sparse index, block cache)
+  → L1 run (binary search by key range, then bloom, index, cache)
+  first version found wins; tombstone or expired ⇒ None
+```
+
+Scans merge every layer with a k-way merge that keeps the highest sequence
+number per key, then hide tombstones, expired values and internal keys.
+
+## Flush and compaction
+
+* **Flush:** an immutable memtable becomes an L0 table (`<id>.sst.tmp` →
+  fsync → rename → manifest update). Its WAL files are then deleted.
+* **Compaction:** when L0 reaches `l0_compaction_trigger` tables, every L0
+  and L1 table is merged into a new L1 run split at `target_table_size_bytes`.
+  * Shadowed versions are dropped.
+  * Expired values become tombstones dated at their expiry.
+  * Tombstones older than `tombstone_retention` are dropped.
+  * Expired internal dedupe records are dropped.
+* Replaced tables are deleted when the last reader holding them finishes.
+
+## Crash recovery
+
+On `Engine::open`:
+
+1. Take an exclusive lock on `LOCK`. A second process gets `StorageError::Locked`.
+2. Load `MANIFEST`. If it is missing while `.sst` files exist, startup fails
+   rather than guessing which tables are live.
+3. Delete `*.tmp` files and `.sst` files not listed in the manifest. These
+   are leftovers of an interrupted flush or compaction.
+4. Open the live tables. Each footer, index and bloom filter is checksum-verified.
+5. Replay WAL files in id order, skipping batches with
+   `seq <= manifest.flushed_seq`, because those are already in tables.
+   * A torn tail in the newest WAL is truncated.
+   * A bad record in an older WAL is fatal corruption.
+6. Persist the manifest, then create a fresh WAL.
+
+`Engine::recovery_report()` exposes what happened.
+
+### What is guaranteed
+
+| Event | Guarantee |
+|---|---|
+| Process crash, any `SyncMode` | Every acknowledged batch is recovered |
+| Power loss, `SyncMode::Always` | Every acknowledged batch is recovered |
+| Power loss, `SyncMode::Never` | A prefix of acknowledged batches is recovered |
+| Crash mid-batch | Batch recovered entirely or not at all |
+| WAL write/fsync error | Write reported outcome-unknown, engine read-only |
+| Corrupted table block | Read returns `Corruption`; never wrong data |
+
+The process-crash row is tested by killing a writer process at varying
+points (`crates/celeris-testkit/tests/crash_recovery.rs`). The power-loss rows
+follow from fsync ordering. They are not yet exercised by an fsync-dropping
+filesystem harness; see the roadmap.
+
+## On-disk formats
+
+All integers are little-endian. Every file type has a magic number and a
+format version. Readers reject unknown versions with
+`StorageError::UnsupportedFormat` instead of guessing.
+
+### Entry (shared by WAL and tables)
+
+```text
+kind u8 (1 put, 2 delete) | seq u64 | timestamp_ms u64 | expires_at_ms u64 (0 = none)
+| mutation_id [16] | key_len u32 | key | value_len u32 | value
+```
+
+### WAL — `<id:020>.wal`, version 1
+
+```text
+"CELRSWAL" | version u32 | reserved u32
+frame*: len u32 | crc32(len_bytes ++ payload) u32 | payload
+payload: 0x01 | count u32 | entry*      (one frame = one batch)
+```
+
+### SSTable — `<id:020>.sst`, version 1
+
+```text
+data block*  : entry* | crc32 u32                 (~block_size_bytes)
+index block  : count u32 | (last_key | offset u64 | len u32)* | crc32 u32
+bloom block  : k u8 | bits | crc32 u32             (xxh3-64, double hashing)
+footer (64 B): index_off u64 | index_len u64 | bloom_off u64 | bloom_len u64
+               | entries u64 | max_seq u64 | version u32 | crc32 u32 | "CELRSSST"
+```
+
+### MANIFEST, version 1
+
+```text
+"CELRSMAN" | version u32 | body_len u32 | crc32(body) u32 | JSON body
+{ "next_file_id", "flushed_seq", "tables": [{ "id", "level", "min_key"(hex),
+  "max_key"(hex), "size", "entries", "max_seq" }] }
+```
+
+Replaced atomically via `MANIFEST.tmp` + fsync + rename + directory fsync.
+
+### Engine snapshot, version 1 (`Engine::snapshot`)
+
+```text
+"CELRSSNP" | version u32 | last_seq u64 | count u64 | entry* | crc32(everything before) u32
+```
+
+The snapshot holds every live put, including expired values and internal
+mutation-ID records, so a replica built from it evaluates TTLs and
+deduplication identically. Tombstones are left out because a fresh engine
+has nothing for them to shadow.
+
+`Engine::create_from_snapshot` requires an empty directory. It writes the
+entries to a new WAL with their original versions, plus an internal marker
+(key `0x00 's'`) at `last_seq`, so that later writes continue from the
+same version numbers on every replica.
+
+### Group Raft log — `groups/<ids>/raft/raft.log`, version 2
+
+```text
+"CLRSRLOG" | version u32 | snapshot_index u64 | snapshot_term u64
+frame*: len u32 | crc32(payload) u32 | JSON log entry
+```
+
+Version 1 files have no snapshot fields (boundary 0) and are still read.
+`hardstate.json` holds `{format_version: 1, term, voted_for}`.
+
+## Metrics
+
+`Engine::metrics()` returns monotonic counters:
+
+* writes, WAL bytes, WAL syncs, WAL failures
+* dedupe hits, condition failures
+* reads, read hits, bloom negatives, cache hits and misses
+* flushes, compactions with bytes in and out, tombstones purged
+* write stalls, background errors
+
+`Engine::stats()` returns gauges: memtable bytes, L0/L1 table counts, table
+bytes, the poisoned flag and the last background error. The server will
+export both in Prometheus format.
+
+## Known limitations
+
+* Full compaction (see `DECISIONS.md` D-003): write amplification grows with data size.
+* No group commit: with `SyncMode::Always` every batch pays one fsync. Throughput is fsync-bound.
+* Scans are not point-in-time snapshots (D-010).
+* No filesystem fault-injection layer yet, so the WAL-failure poison path is
+  covered by code review, not by an automated test.

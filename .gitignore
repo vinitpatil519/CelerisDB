@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+/data
+/celeris-data
+node_modules/
+dist/
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+__pycache__/
+.pytest_cache/
+*.egg-info/

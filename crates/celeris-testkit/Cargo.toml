@@ -1,0 +1,23 @@
+[package]
+name = "celeris-testkit"
+description = "Failure-injection harnesses for Celeris: kill-during-write crash recovery and friends."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "celeris-crash-writer"
+path = "src/bin/crash_writer.rs"
+
+[dependencies]
+celeris-storage.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
