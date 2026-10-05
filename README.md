@@ -28,7 +28,7 @@ TypeScript (plus a React hook), Python, Rust and Go. See
 | 5. STRICT mode, checked by a linearizability checker under leader failure | done |
 | 6. AVAILABLE / EVENTUAL modes: local accept, reconciliation, conflicts, anti-entropy | done |
 | 7. SDKs (TypeScript + React, Python, Rust, Go) and WebSocket change streams | done |
-| 8. Docker, compose, Kubernetes, website | in progress: Docker image, 3-node compose, Kubernetes manifest and AWS guide done ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) |
+| 8. Docker, compose, Kubernetes, AWS guide, admin console, website, release binaries | done ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) |
 | 9. Hardening: auth, TLS, backup/restore, benchmarks | planned |
 
 ## Quick start
@@ -106,6 +106,8 @@ sdks/
   rust/              celeris-client crate (workspace member)
   go/                Go module
 console/           browser admin console (React + Vite)
+website/           landing page (React, GSAP, Lenis)
+install.sh, install.ps1   release installers
 Dockerfile, docker-compose.yml   container image and a local 3-node cluster
 deploy/kubernetes/ StatefulSet manifest
 docs/

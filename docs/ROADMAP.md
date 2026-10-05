@@ -238,7 +238,7 @@ writes.
 
 Not done: resumable change streams (from a log position).
 
-## M8 — Deployment and website
+## M8 — Deployment and website: done
 
 * [x] Dockerfile (multi-stage, non-root, tini) and 3-node `docker compose`
   that bootstraps itself (D-025); CI builds it and checks replication.
@@ -248,7 +248,11 @@ Not done: resumable change streams (from a log position).
 * [x] AWS reference architecture (EC2/EBS, EKS): `docs/DEPLOYMENT.md`.
 * [x] Admin console (`console/`): overview, partitions, data explorer with
   compare-and-set, live change stream, conflicts.
-* [ ] Landing page: React, GSAP, Lenis, SVG.
+* [x] Landing page (`website/`): React, GSAP ScrollTrigger, Lenis, SVG
+  diagram primitives; all twelve sections of `landingpage.md`, reduced-motion
+  and keyboard support.
+* [x] Release binaries for Linux, macOS and Windows on `v*` tags, with
+  `install.sh` / `install.ps1` (checksums verified).
 
 ## M9 — Hardening
 
