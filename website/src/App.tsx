@@ -1,47 +1,72 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
-import { Nav, ProgressRail, usePointerLight } from "./components/chrome";
-import { ScrollTrigger, startSmoothScroll } from "./motion";
-import { Deploy, FinalCta, Install, Realtime } from "./sections/Developer";
-import { Partitions, Storage } from "./sections/Engine";
-import { Conflicts, Split } from "./sections/Failure";
+import { Nav, ScrollProgress } from "./components/ui";
+import { prefersReducedMotion, ScrollTrigger, startSmoothScroll } from "./motion";
+import { Developers } from "./sections/Developers";
 import { Hero } from "./sections/Hero";
-import { Cap, Dial, Request } from "./sections/Story";
+import { Journey } from "./sections/Journey";
+import { Modes } from "./sections/Modes";
+import { Proof } from "./sections/Proof";
+import { Resilience } from "./sections/Resilience";
+
+/** A soft light that trails the pointer across the page (fine pointers only). */
+function CursorGlow() {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!window.matchMedia("(pointer: fine)").matches || prefersReducedMotion()) return;
+    let x = innerWidth / 2;
+    let y = innerHeight / 2;
+    let tx = x;
+    let ty = y;
+    let raf = 0;
+    const onMove = (e: PointerEvent) => {
+      tx = e.clientX;
+      ty = e.clientY;
+    };
+    const loop = () => {
+      x += (tx - x) * 0.12;
+      y += (ty - y) * 0.12;
+      ref.current?.style.setProperty("transform", `translate3d(${x - 300}px, ${y - 300}px, 0)`);
+      raf = requestAnimationFrame(loop);
+    };
+    addEventListener("pointermove", onMove, { passive: true });
+    raf = requestAnimationFrame(loop);
+    return () => {
+      removeEventListener("pointermove", onMove);
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+  return <div className="cursor-glow" ref={ref} aria-hidden="true" />;
+}
 
 export function App() {
   useEffect(() => {
     const stop = startSmoothScroll();
-    // Layout settles after fonts and images; recompute trigger positions.
     const refresh = () => ScrollTrigger.refresh();
-    window.addEventListener("load", refresh);
+    addEventListener("load", refresh);
+    document.fonts?.ready.then(refresh);
     return () => {
-      window.removeEventListener("load", refresh);
+      removeEventListener("load", refresh);
       stop();
     };
   }, []);
-  usePointerLight();
 
   return (
     <>
-      <a className="skip" href="#install">
+      <a className="skip" href="#start">
         Skip to install
       </a>
-      <div className="backdrop" aria-hidden="true" />
+      <div className="grain" aria-hidden="true" />
+      <CursorGlow />
+      <ScrollProgress />
       <Nav />
-      <ProgressRail />
       <main>
         <Hero />
-        <Cap />
-        <Dial />
-        <Request />
-        <Partitions />
-        <Storage />
-        <Split />
-        <Conflicts />
-        <Realtime />
-        <Deploy />
-        <Install />
-        <FinalCta />
+        <Proof />
+        <Modes />
+        <Journey />
+        <Resilience />
+        <Developers />
       </main>
     </>
   );

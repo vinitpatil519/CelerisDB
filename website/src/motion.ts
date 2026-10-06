@@ -1,17 +1,22 @@
 /**
- * One Lenis instance for the whole page, driven by GSAP's ticker so smooth
- * scrolling and ScrollTrigger stay in step. Reduced-motion users get native
- * scrolling and no scrubbed animation.
+ * Motion foundation: one Lenis instance driven by GSAP's ticker, the GSAP
+ * plugins the page uses, and small helpers shared by every section.
+ * Reduced-motion users get native scrolling and final states.
  */
 
+import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
+import { DrawSVGPlugin } from "gsap/DrawSVGPlugin";
+import { MotionPathPlugin } from "gsap/MotionPathPlugin";
+import { ScrambleTextPlugin } from "gsap/ScrambleTextPlugin";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { SplitText } from "gsap/SplitText";
 import Lenis from "lenis";
 import { useEffect, useState } from "react";
 
-gsap.registerPlugin(ScrollTrigger);
+gsap.registerPlugin(ScrollTrigger, SplitText, DrawSVGPlugin, MotionPathPlugin, ScrambleTextPlugin, useGSAP);
 
-export { gsap, ScrollTrigger };
+export { gsap, ScrollTrigger, SplitText, useGSAP };
 
 const QUERY = "(prefers-reduced-motion: reduce)";
 
@@ -32,11 +37,11 @@ export function useReducedMotion(): boolean {
 
 let lenis: Lenis | null = null;
 
-/** Starts smooth scrolling once; returns a cleanup function. */
 export function startSmoothScroll(): () => void {
   if (prefersReducedMotion() || lenis) return () => {};
-  const instance = new Lenis({ lerp: 0.1, smoothWheel: true });
+  const instance = new Lenis({ lerp: 0.09, smoothWheel: true, wheelMultiplier: 0.9 });
   lenis = instance;
+  (window as unknown as { __lenis?: Lenis }).__lenis = instance;
   instance.on("scroll", ScrollTrigger.update);
   const tick = (time: number) => instance.raf(time * 1000);
   gsap.ticker.add(tick);
@@ -48,44 +53,61 @@ export function startSmoothScroll(): () => void {
   };
 }
 
-/** Scrolls to an element, through Lenis when it runs. */
 export function scrollToId(id: string): void {
   const target = document.getElementById(id);
   if (!target) return;
-  if (lenis) lenis.scrollTo(target, { offset: -8 });
+  if (lenis) lenis.scrollTo(target, { offset: -40, duration: 1.4 });
   else target.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth" });
-  target.focus({ preventScroll: true });
+}
+
+/** Click handler for in-page links that scroll through Lenis. */
+export function jump(id: string) {
+  return (e: React.MouseEvent) => {
+    e.preventDefault();
+    scrollToId(id);
+    history.replaceState(null, "", `#${id}`);
+  };
 }
 
 /**
- * Scroll progress (0..1) of `ref` through the viewport: 0 when its top
- * reaches the top of the screen, 1 when its bottom does. Static at 1 for
- * reduced motion, so the final state is shown.
+ * Reveals every `[data-reveal]` element inside `scope` as it scrolls in:
+ * `lines` splits headings into masked lines, `fade` lifts and fades,
+ * `draw` draws SVG strokes.
  */
-export function useScrollProgress(ref: React.RefObject<HTMLElement | null>, steps = 0): number {
-  // Narrow screens do not pin sections (see global.css), so show the end state.
-  const reduced = useReducedMotion() || (typeof window !== "undefined" && window.innerWidth <= 960);
-  const [progress, setProgress] = useState(reduced ? 1 : 0);
-  useEffect(() => {
-    if (reduced || !ref.current) {
-      setProgress(1);
-      return;
-    }
-    const trigger = ScrollTrigger.create({
-      trigger: ref.current,
-      start: "top top",
-      end: "bottom bottom",
-      onUpdate: (self) => {
-        const p = steps > 0 ? Math.round(self.progress * steps) / steps : self.progress;
-        setProgress(p);
-      },
+export function revealIn(scope: Element) {
+  if (prefersReducedMotion()) return;
+  scope.querySelectorAll<HTMLElement>("[data-reveal='lines']").forEach((el) => {
+    const split = SplitText.create(el, { type: "lines,words", mask: "lines", wordsClass: "word" });
+    el.classList.add("is-split");
+    gsap.from(split.lines, {
+      yPercent: 110,
+      opacity: 0,
+      duration: 1.1,
+      ease: "expo.out",
+      stagger: 0.08,
+      scrollTrigger: { trigger: el, start: "top 85%", once: true },
     });
-    return () => trigger.kill();
-  }, [ref, reduced, steps]);
-  return progress;
+  });
+  scope.querySelectorAll<HTMLElement>("[data-reveal='fade']").forEach((el) => {
+    gsap.from(el, {
+      y: 28,
+      opacity: 0,
+      filter: "blur(6px)",
+      duration: 1.1,
+      ease: "power3.out",
+      delay: Number(el.dataset.delay ?? 0),
+      scrollTrigger: { trigger: el, start: "top 88%", once: true },
+    });
+  });
+  scope.querySelectorAll<SVGElement>("[data-reveal='draw']").forEach((el) => {
+    gsap.from(el, {
+      drawSVG: "0%",
+      duration: 1.8,
+      ease: "power2.inOut",
+      scrollTrigger: { trigger: el, start: "top 85%", once: true },
+    });
+  });
 }
 
-/** Linear interpolation of `p` between `from` and `to`, clamped to 0..1. */
-export function phase(p: number, from: number, to: number): number {
-  return Math.min(1, Math.max(0, (p - from) / (to - from)));
-}
+/** Lerp helper. */
+export const mix = (a: number, b: number, t: number) => a + (b - a) * t;
