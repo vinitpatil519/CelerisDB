@@ -916,6 +916,17 @@ pub async fn serve(
     cluster: Option<TcpListener>,
     external: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    serve_with_tls(node, listener, cluster, None, external).await
+}
+
+/// Like [`serve`], and with `tls` the client API speaks HTTPS only.
+pub async fn serve_with_tls(
+    node: Arc<Node>,
+    listener: TcpListener,
+    cluster: Option<TcpListener>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    external: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     let app = crate::api::router(Arc::clone(&node));
     let internal = node.shutdown_requested();
     let (stop_cluster, cluster_stopped) = watch::channel(false);
@@ -936,13 +947,16 @@ pub async fn serve(
         info!("shutdown requested; draining in-flight requests");
         stop_cluster.send_replace(true);
     };
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(signal)
-    .await
-    .context("HTTP server failed")?;
+    match tls {
+        None => axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(signal)
+        .await
+        .context("HTTP server failed")?,
+        Some(acceptor) => serve_tls(listener, app, acceptor, signal).await,
+    }
     if let Some(mut gossip) = gossip {
         let _ = (&mut gossip.0).await;
     }
@@ -952,6 +966,71 @@ pub async fn serve(
         .context("closing storage")?;
     info!("node stopped");
     Ok(())
+}
+
+/// HTTPS accept loop: TLS handshake, then HTTP/1.1 or HTTP/2 (with
+/// WebSocket upgrades) on hyper. Peer addresses reach handlers as
+/// `ConnectInfo`, like the plain-HTTP path. On shutdown it stops accepting
+/// and gives open connections up to 10 s to finish.
+async fn serve_tls(
+    listener: TcpListener,
+    app: axum::Router,
+    acceptor: tokio_rustls::TlsAcceptor,
+    signal: impl Future<Output = ()>,
+) {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder;
+    use hyper_util::server::graceful::GracefulShutdown;
+
+    let graceful = GracefulShutdown::new();
+    tokio::pin!(signal);
+    loop {
+        let (tcp, peer) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(conn) => conn,
+                Err(e) => {
+                    warn!(error = %e, "accept failed");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+            },
+            () = &mut signal => break,
+        };
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        let watcher = graceful.watcher();
+        tokio::spawn(async move {
+            let tls =
+                match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(e)) => {
+                        tracing::debug!(%peer, error = %e, "TLS handshake failed");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::debug!(%peer, "TLS handshake timed out");
+                        return;
+                    }
+                };
+            let service = hyper::service::service_fn(
+                move |mut req: hyper::Request<hyper::body::Incoming>| {
+                    req.extensions_mut()
+                        .insert(axum::extract::ConnectInfo(peer));
+                    let mut app = app.clone();
+                    async move { tower::Service::call(&mut app, req).await }
+                },
+            );
+            let builder = Builder::new(TokioExecutor::new());
+            let conn = builder.serve_connection_with_upgrades(TokioIo::new(tls), service);
+            if let Err(e) = watcher.watch(conn).await {
+                tracing::debug!(%peer, error = %e, "HTTPS connection ended with an error");
+            }
+        });
+    }
+    tokio::select! {
+        () = graceful.shutdown() => {}
+        () = tokio::time::sleep(Duration::from_secs(10)) => warn!("timed out draining HTTPS connections"),
+    }
 }
 
 /// Persists and returns a fresh membership incarnation, one higher than the

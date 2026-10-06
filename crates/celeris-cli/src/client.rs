@@ -71,6 +71,42 @@ pub fn set_token(token: Option<String>) {
     let _ = TOKEN.set(token.filter(|t| !t.is_empty()));
 }
 
+/// TLS trust for HTTPS nodes signed by a private CA (`--ca-cert`).
+static TLS: std::sync::OnceLock<Option<std::sync::Arc<rustls::ClientConfig>>> =
+    std::sync::OnceLock::new();
+
+/// Trusts only the CA certificates in `pem_file` for HTTPS. Without it, the
+/// public web PKI roots are used.
+pub fn set_ca_cert(pem_file: Option<&std::path::Path>) -> anyhow::Result<()> {
+    use rustls_pki_types::CertificateDer;
+    use rustls_pki_types::pem::PemObject;
+    let config = match pem_file {
+        None => None,
+        Some(path) => {
+            let pem = std::fs::read(path)
+                .map_err(|e| anyhow::anyhow!("reading CA certificate {}: {e}", path.display()))?;
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in CertificateDer::pem_slice_iter(&pem) {
+                roots.add(cert.map_err(|e| anyhow::anyhow!("parsing {}: {e}", path.display()))?)?;
+            }
+            anyhow::ensure!(
+                !roots.is_empty(),
+                "{} contains no certificate",
+                path.display()
+            );
+            let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+            Some(std::sync::Arc::new(
+                rustls::ClientConfig::builder_with_provider(provider)
+                    .with_safe_default_protocol_versions()?
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            ))
+        }
+    };
+    let _ = TLS.set(config);
+    Ok(())
+}
+
 impl Client {
     pub fn new(addr: &str) -> Self {
         let addr = addr.trim_end_matches('/');
@@ -79,10 +115,13 @@ impl Client {
         } else {
             format!("http://{addr}")
         };
-        let agent = ureq::AgentBuilder::new()
+        let mut agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(3))
-            .timeout(Duration::from_secs(60))
-            .build();
+            .timeout(Duration::from_secs(60));
+        if let Some(Some(tls)) = TLS.get() {
+            agent = agent.tls_config(std::sync::Arc::clone(tls));
+        }
+        let agent = agent.build();
         Client {
             base,
             agent,

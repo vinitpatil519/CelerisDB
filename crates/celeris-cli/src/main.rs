@@ -44,6 +44,9 @@ struct Cli {
     /// Print raw JSON responses.
     #[arg(long, global = true)]
     json: bool,
+    /// PEM CA certificate to trust for HTTPS nodes (private CAs, self-signed).
+    #[arg(long, global = true, env = "CELERIS_CA_CERT")]
+    ca_cert: Option<PathBuf>,
     /// API token, sent as `Authorization: Bearer <token>`.
     #[arg(long, global = true, env = "CELERIS_TOKEN", hide_env_values = true)]
     token: Option<String>,
@@ -228,6 +231,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     client::set_token(cli.token.clone());
+    client::set_ca_cert(cli.ca_cert.as_deref())?;
     let client = Client::new(&cli.addr);
     let json = cli.json;
     match cli.command {
@@ -577,16 +581,21 @@ fn start(path: &Path) -> anyhow::Result<ExitCode> {
                 .await
                 .context("opening node")??;
         let node = Arc::new(node);
+        let tls = match &config.http.tls {
+            Some(t) => Some(celeris_server::tls::acceptor(&t.cert_file, &t.key_file)?),
+            None => None,
+        };
         println!(
-            "celeris {} node {} listening on http://{local}",
+            "celeris {} node {} listening on {}://{local}",
             env!("CARGO_PKG_VERSION"),
-            node.id()
+            node.id(),
+            if tls.is_some() { "https" } else { "http" }
         );
         if let Some(addr) = cluster_addr {
             println!("cluster port {addr}");
         }
         io::stdout().flush()?;
-        celeris_server::serve(node, listener, cluster, async {
+        celeris_server::serve_with_tls(node, listener, cluster, tls, async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await

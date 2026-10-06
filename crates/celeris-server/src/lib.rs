@@ -17,7 +17,8 @@ mod migration;
 pub mod node;
 mod raft_log;
 mod replicated;
+pub mod tls;
 
 pub use config::Config;
 pub use error::{ApiError, Outcome};
-pub use node::{Node, serve};
+pub use node::{Node, serve, serve_with_tls};

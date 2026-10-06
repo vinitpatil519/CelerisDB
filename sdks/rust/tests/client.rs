@@ -337,7 +337,10 @@ async fn tokens_authorize_requests_and_watches() {
         .build()
         .expect("client");
     let err = anonymous.get::<Value>("a").await.expect_err("401");
-    assert_eq!((err.status(), err.code()), (Some(401), Some("unauthorized")));
+    assert_eq!(
+        (err.status(), err.code()),
+        (Some(401), Some("unauthorized"))
+    );
 
     let db = Client::builder()
         .node(&node.url)

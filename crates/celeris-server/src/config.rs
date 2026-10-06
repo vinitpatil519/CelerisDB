@@ -62,6 +62,18 @@ pub struct HttpConfig {
     pub listen: String,
     /// Browser origins allowed by CORS. Empty disables CORS; `"*"` allows any.
     pub cors_origins: Vec<String>,
+    /// Serve HTTPS with this certificate and key. Relative paths in a config
+    /// file are resolved against the file's directory.
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// PEM certificate chain (leaf first).
+    pub cert_file: PathBuf,
+    /// PEM private key (PKCS#8, PKCS#1 or SEC1).
+    pub key_file: PathBuf,
 }
 
 impl Default for HttpConfig {
@@ -69,6 +81,7 @@ impl Default for HttpConfig {
         HttpConfig {
             listen: "127.0.0.1:8080".into(),
             cors_origins: Vec::new(),
+            tls: None,
         }
     }
 }
@@ -205,10 +218,17 @@ impl Config {
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut config: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        if config.node.data_dir.is_relative()
-            && let Some(base) = path.parent()
-        {
-            config.node.data_dir = base.join(&config.node.data_dir);
+        if let Some(base) = path.parent() {
+            if config.node.data_dir.is_relative() {
+                config.node.data_dir = base.join(&config.node.data_dir);
+            }
+            if let Some(tls) = &mut config.http.tls {
+                for file in [&mut tls.cert_file, &mut tls.key_file] {
+                    if file.is_relative() {
+                        *file = base.join(&*file);
+                    }
+                }
+            }
         }
         Ok(config)
     }
@@ -228,6 +248,16 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect();
+        }
+        match (get("CELERIS_TLS_CERT"), get("CELERIS_TLS_KEY")) {
+            (Some(cert), Some(key)) => {
+                self.http.tls = Some(TlsConfig {
+                    cert_file: cert.into(),
+                    key_file: key.into(),
+                });
+            }
+            (None, None) => {}
+            _ => bail!("set both CELERIS_TLS_CERT and CELERIS_TLS_KEY, or neither"),
         }
         if let Some(v) = get("CELERIS_REPLICATION_FACTOR") {
             self.cluster.replication_factor = v
@@ -387,6 +417,8 @@ data_dir = "celeris-data"
 listen = "{listen}"
 # Browser origins allowed to call the API, e.g. ["http://localhost:5173"]. [CELERIS_CORS_ORIGINS]
 cors_origins = []
+# Serve HTTPS instead of HTTP. [CELERIS_TLS_CERT, CELERIS_TLS_KEY]
+# tls = { cert_file = "tls/node.crt", key_file = "tls/node.key" }
 
 [cluster]
 # Uncomment `listen` to join a cluster. The cluster port carries only

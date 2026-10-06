@@ -8,7 +8,8 @@ speaks to the other nodes on a separate cluster port.
 | 8080 | HTTP/JSON API, WebSocket change streams, `/metrics`, `/health`, `/ready` | clients, load balancer, Prometheus |
 | 7000 | node-to-node: gossip, Raft, snapshots, migration | other nodes only |
 
-The cluster port is not authenticated yet (see [ROADMAP.md](ROADMAP.md),
+Serve the API over HTTPS with `CELERIS_TLS_CERT` and `CELERIS_TLS_KEY`
+(see [API.md](API.md#tls)). The cluster port is not authenticated yet (see [ROADMAP.md](ROADMAP.md),
 M9), so keep it on a private network or security group.
 
 ## Sizing and topology

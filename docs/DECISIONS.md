@@ -225,6 +225,20 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-028 HTTPS for the client API
+
+* **rustls with the ring provider.** It needs only a C compiler, unlike
+  aws-lc-rs (cmake, NASM), and the lockfile already carried it through
+  reqwest.
+* **HTTPS only when configured.** A node with a certificate serves HTTPS on
+  its API port and nothing else; a plain HTTP request fails the handshake.
+* **Same behaviour as plain HTTP.** The TLS path runs the same axum router on
+  hyper-util with upgrades (WebSockets), injects the peer address as
+  `ConnectInfo` (used by admin checks), negotiates h2 or HTTP/1.1, and drains
+  connections for up to 10 s on shutdown.
+* **Not yet.** mTLS between nodes on the cluster port, and certificate
+  reload without a restart.
+
 ## D-027 API tokens with scopes
 
 * **Hashed at rest.** Nodes store the SHA-256 of each token, never the

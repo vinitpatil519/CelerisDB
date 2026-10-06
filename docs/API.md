@@ -7,6 +7,20 @@ unchanged.
 Browsers and SDKs only ever use this API. Internal cluster protocols are never
 exposed.
 
+## TLS
+
+Set `[http] tls = { cert_file = "...", key_file = "..." }` (or
+`CELERIS_TLS_CERT` and `CELERIS_TLS_KEY`) to serve the API over HTTPS only,
+with HTTP/2 and HTTP/1.1 negotiated by ALPN. Certificates are PEM: a chain
+with the leaf first, and a PKCS#8, PKCS#1 or SEC1 key. WebSocket change
+streams use `wss://`.
+
+* The CLI trusts the public web PKI by default. For a private CA, pass
+  `--ca-cert ca.pem` (or `CELERIS_CA_CERT`).
+* SDKs use their platform trust store. For Node.js, set
+  `NODE_EXTRA_CA_CERTS`; for Python, `SSL_CERT_FILE`.
+* The cluster port is not encrypted yet: keep it on a private network.
+
 ## Authentication
 
 Authentication is off until at least one token is configured (`[[auth.tokens]]`
