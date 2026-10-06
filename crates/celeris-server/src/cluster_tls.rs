@@ -103,11 +103,59 @@ fn server_name(addr: &str) -> io::Result<ServerName<'static>> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
+/// How a node reaches its peers: TLS settings, plus peers it must not
+/// reach (fault injection for tests, see [`crate::Node::isolate_from`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Dialer {
+    tls: Option<Arc<ClusterTls>>,
+    blocked: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+}
+
+impl Dialer {
+    pub(crate) fn new(tls: Option<ClusterTls>) -> Dialer {
+        Dialer {
+            tls: tls.map(Arc::new),
+            blocked: Arc::default(),
+        }
+    }
+
+    /// Identifies this node's way of dialing: pooled connections are never
+    /// shared between nodes in one process (tests), TLS modes, or
+    /// isolation sets.
+    pub(crate) fn pool_key(&self, addr: &str) -> String {
+        format!(
+            "{:p}/{}/{addr}",
+            Arc::as_ptr(&self.blocked),
+            if self.tls.is_some() { "tls" } else { "tcp" }
+        )
+    }
+
+    pub(crate) fn is_blocked(&self, addr: &str) -> bool {
+        self.blocked
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(addr)
+    }
+
+    pub(crate) fn set_blocked(&self, addrs: impl IntoIterator<Item = String>) {
+        *self
+            .blocked
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = addrs.into_iter().collect();
+    }
+}
+
 /// Dials a peer's cluster port.
-pub(crate) async fn connect(tls: Option<&ClusterTls>, addr: &str) -> io::Result<Conn> {
+pub(crate) async fn connect(dialer: &Dialer, addr: &str) -> io::Result<Conn> {
+    if dialer.is_blocked(addr) {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "peer is isolated by fault injection",
+        ));
+    }
     let tcp = TcpStream::connect(addr).await?;
     let _ = tcp.set_nodelay(true);
-    match tls {
+    match dialer.tls.as_deref() {
         None => Ok(Box::pin(tcp)),
         Some(t) => Ok(Box::pin(
             t.connector.connect(server_name(addr)?, tcp).await?,
@@ -116,8 +164,8 @@ pub(crate) async fn connect(tls: Option<&ClusterTls>, addr: &str) -> io::Result<
 }
 
 /// Completes an inbound connection (the TLS handshake, when configured).
-pub(crate) async fn accept(tls: Option<&ClusterTls>, tcp: TcpStream) -> io::Result<Conn> {
-    match tls {
+pub(crate) async fn accept(dialer: &Dialer, tcp: TcpStream) -> io::Result<Conn> {
+    match dialer.tls.as_deref() {
         None => Ok(Box::pin(tcp)),
         Some(t) => Ok(Box::pin(t.acceptor.accept(tcp).await?)),
     }

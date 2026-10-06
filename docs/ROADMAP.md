@@ -266,7 +266,9 @@ Not done: resumable change streams (from a log position).
   a single node, JSON-lines export/import for any cluster.
 * [x] Criterion micro-benchmarks for the storage engine
   (`cargo bench -p celeris-storage`; numbers in STORAGE_ENGINE.md).
-* [ ] Chaos suite beyond the current crash, failover and partition tests.
+* [x] Chaos suite (D-034): seeded random partitions and crash-restarts
+  under a compare-and-set workload (`tests/chaos.rs`); counters must match
+  acknowledged increments exactly and replicas must converge.
 
 ## M10 — Queries
 

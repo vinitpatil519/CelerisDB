@@ -225,6 +225,27 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-034 Chaos testing with in-process fault injection
+
+* **Partitions without root.** `Node::isolate_from(peers)` (a test hook)
+  makes a node drop every frame to those cluster addresses and refuse to
+  dial them. Isolating both ends of each link partitions a node from the
+  rest; an empty list heals it. It sits in the dialer, which every cluster
+  send and connection goes through. Pooled connections are keyed per node,
+  so nodes sharing a test process do not share isolation.
+* **Workload with a checkable invariant.** Clients increment counters
+  with read then compare-and-set against random nodes. Every acknowledged
+  increment must be in the final value, and nothing else may be except
+  increments whose outcome was reported unknown:
+  `acked <= value <= acked + unknown`. Lost or double-applied writes break
+  it. Afterwards every replica must converge to that value.
+* **Seeded and replayable.** Faults (isolate for 1.5-2.5 s, crash and
+  restart on the same ports and data, or calm) come from a seeded PRNG;
+  `CELERIS_CHAOS_SEED` replays a run. It complements the
+  linearizability checker (M5), which covers leader failure in depth.
+* **Not yet.** Asymmetric and flapping links, clock skew, disk faults, and
+  long soak runs.
+
 ## D-033 Mutual TLS on the cluster port
 
 * **Opt-in, all or nothing.** `cluster.tls` (certificate, key, CA) wraps

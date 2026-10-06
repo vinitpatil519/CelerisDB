@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::cluster_tls::{ClusterTls, Conn, accept, connect};
+use crate::cluster_tls::{Conn, Dialer, accept, connect};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -210,7 +210,7 @@ pub(crate) fn send_group(
             from: node.node_id().clone(),
             message: e.message,
         };
-        let tls = node.cluster_tls();
+        let tls = node.dialer();
         if bulky {
             // Entries can be megabytes; encode them off the runtime threads.
             tokio::spawn(async move {
@@ -270,7 +270,7 @@ pub(crate) async fn push_snapshot(
     };
     let result = match encode_snapshot(&header, &payload.data) {
         Ok(stream) => tokio::time::timeout(SNAPSHOT_TIMEOUT, async {
-            let mut conn = connect(node.cluster_tls().as_deref(), &addr).await?;
+            let mut conn = connect(&node.dialer(), &addr).await?;
             conn.write_all(&stream).await?;
             conn.shutdown().await
         })
@@ -482,9 +482,9 @@ pub(crate) async fn rpc<T: serde::de::DeserializeOwned + Send + 'static>(
     timeout: Duration,
 ) -> anyhow::Result<T> {
     let request = serde_json::to_vec(request)?;
-    let tls = node.cluster_tls();
+    let tls = node.dialer();
     tokio::time::timeout(timeout, async {
-        let mut conn = connect(tls.as_deref(), addr).await?;
+        let mut conn = connect(&tls, addr).await?;
         let mut head = RPC_REQUEST_MAGIC.to_vec();
         head.push(RPC_VERSION);
         head.extend_from_slice(&(request.len() as u32).to_be_bytes());
@@ -548,7 +548,7 @@ pub(crate) async fn propose_control(node: &Arc<Node>, command: ControlCommand) {
         let frame = Frame::ControlPropose {
             command: command.clone(),
         };
-        tokio::spawn(send(node.cluster_tls(), addr, encode(&frame)));
+        tokio::spawn(send(node.dialer(), addr, encode(&frame)));
     }
 }
 
@@ -568,7 +568,7 @@ pub(crate) fn forward_rebalance(node: &Node, leader: &NodeId, rf: u8) -> bool {
             replication_factor: rf,
         },
     };
-    tokio::spawn(send(node.cluster_tls(), addr, encode(&frame)));
+    tokio::spawn(send(node.dialer(), addr, encode(&frame)));
     true
 }
 
@@ -667,12 +667,14 @@ static POOL: std::sync::LazyLock<
 /// connection each, which would exhaust ephemeral ports with sockets in
 /// TIME_WAIT. Bulky frames get their own connection so they do not hold
 /// up the small ones.
-async fn send(tls: Option<Arc<ClusterTls>>, addr: String, frame: Vec<u8>) {
+async fn send(tls: Dialer, addr: String, frame: Vec<u8>) {
     if frame.len() > BULKY_FRAME_BYTES {
         return send_direct(tls, addr, frame).await;
     }
-    // Plain and TLS connections to one address never share a writer.
-    let key = format!("{}{addr}", if tls.is_some() { "tls:" } else { "" });
+    if tls.is_blocked(&addr) {
+        return;
+    }
+    let key = tls.pool_key(&addr);
     let mut frame = frame;
     for _ in 0..2 {
         let tx = POOL
@@ -704,17 +706,13 @@ async fn send(tls: Option<Arc<ClusterTls>>, addr: String, frame: Vec<u8>) {
 /// Owns the pooled connection to one peer: connects on demand, writes
 /// queued frames in order, reconnects after an error (dropping the frame
 /// that failed), and exits when idle.
-fn spawn_writer(
-    tls: Option<Arc<ClusterTls>>,
-    addr: String,
-    key: String,
-) -> tokio::sync::mpsc::Sender<Vec<u8>> {
+fn spawn_writer(tls: Dialer, addr: String, key: String) -> tokio::sync::mpsc::Sender<Vec<u8>> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(POOL_QUEUE);
     tokio::spawn(async move {
         let mut stream: Option<Conn> = None;
         while let Ok(Some(frame)) = tokio::time::timeout(POOL_IDLE, rx.recv()).await {
             if stream.is_none() {
-                match tokio::time::timeout(IO_TIMEOUT, connect(tls.as_deref(), &addr)).await {
+                match tokio::time::timeout(IO_TIMEOUT, connect(&tls, &addr)).await {
                     Ok(Ok(s)) => {
                         stream = Some(s);
                     }
@@ -753,9 +751,9 @@ fn spawn_writer(
 
 /// Sends a frame over a connection of its own and waits until it is
 /// written.
-async fn send_direct(tls: Option<Arc<ClusterTls>>, addr: String, frame: Vec<u8>) {
+async fn send_direct(tls: Dialer, addr: String, frame: Vec<u8>) {
     let result = tokio::time::timeout(transfer_timeout(frame.len()), async {
-        let mut stream = connect(tls.as_deref(), &addr).await?;
+        let mut stream = connect(&tls, &addr).await?;
         stream.write_all(&frame).await?;
         stream.shutdown().await
     })
@@ -770,7 +768,7 @@ async fn send_direct(tls: Option<Arc<ClusterTls>>, addr: String, frame: Vec<u8>)
 fn dispatch_membership(node: &Node, outs: Vec<celeris_cluster::Outgoing>) {
     for o in outs {
         tokio::spawn(send(
-            node.cluster_tls(),
+            node.dialer(),
             o.addr,
             encode(&Frame::Membership(o.message)),
         ));
@@ -787,7 +785,7 @@ pub(crate) fn send_raft(node: &Node, out: Vec<Envelope<ControlCommand>>) {
                     from: node.node_id().clone(),
                     message: e.message,
                 };
-                tokio::spawn(send(node.cluster_tls(), addr, encode(&frame)));
+                tokio::spawn(send(node.dialer(), addr, encode(&frame)));
             }
             None => debug!(peer = %e.to, "no cluster address for raft peer yet"),
         }
@@ -932,9 +930,9 @@ pub(crate) async fn run(node: Arc<Node>, listener: TcpListener, mut stop: watch:
                 Ok((tcp, peer)) => {
                     let node = Arc::clone(&node);
                     tokio::spawn(async move {
-                        let tls = node.cluster_tls();
+                        let tls = node.dialer();
                         let mut stream =
-                            match tokio::time::timeout(IO_TIMEOUT, accept(tls.as_deref(), tcp)).await {
+                            match tokio::time::timeout(IO_TIMEOUT, accept(&tls, tcp)).await {
                                 Ok(Ok(s)) => s,
                                 Ok(Err(e)) => {
                                     warn!(%peer, error = %e, "cluster TLS handshake failed");
@@ -991,7 +989,7 @@ pub(crate) async fn run(node: Arc<Node>, listener: TcpListener, mut stop: watch:
         .into_iter()
         .map(|o| {
             tokio::spawn(send_direct(
-                node.cluster_tls(),
+                node.dialer(),
                 o.addr,
                 encode(&Frame::Membership(o.message)),
             ))
