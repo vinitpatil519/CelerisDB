@@ -225,6 +225,36 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-029 Backups: physical snapshots and logical exports
+
+* **Physical backup, single node.** `GET /v1/admin/backup` streams an engine
+  snapshot (the format replicas already use for catch-up). The node keeps
+  serving. Under the writer lock it drains group commit and freezes the
+  active memtable, then encodes only the frozen memtables and SSTables
+  outside the lock. That set is a consistent cut at `last_seq`: writes that
+  arrive later go to the new memtable and are not included. Tables
+  compacted away meanwhile stay readable, because files are deleted only
+  when the last reference drops.
+* **Restore is offline.** `celeris restore` builds a new data directory with
+  `Engine::create_from_snapshot` and refuses a non-empty one, so it never
+  mixes with old state. Versions are preserved exactly.
+* **Clusters use exports.** Replica sets have their own Raft logs, epochs
+  and placement; a per-node snapshot cannot be restored on its own. The
+  backup endpoint answers 501 in replicated mode instead of producing a
+  file that cannot be used.
+* **Logical export/import.** JSON lines through the public API: works over
+  HTTPS, with tokens, across cluster shapes and versions of the on-disk
+  format. TTLs are stored as absolute expiry times and converted back to
+  remaining TTLs on import.
+* **Idempotent import.** Each batch's mutation ID is the xxh3-128 of its
+  lines. A re-run sends the same ID; the server answers
+  `mutation_id_reused` (the remaining TTL differs, so the request is not
+  byte-identical) and the CLI counts the batch as already imported. When a
+  batch spans replica sets (`cross_group_batch`), keys are written one by
+  one in parallel, each with its own content-derived ID.
+* **Not yet.** Incremental backups, point-in-time recovery, and a
+  coordinated cluster-wide physical snapshot.
+
 ## D-028 HTTPS for the client API
 
 * **rustls with the ring provider.** It needs only a C compiler, unlike

@@ -331,6 +331,45 @@ fn decode_mutation(entry: Option<Entry>, id: MutationId, now: u64) -> Result<Opt
     Ok(Some((version, fingerprint)))
 }
 
+/// Encodes every live put visible in `v` as an engine snapshot at `last_seq`.
+fn encode_snapshot(v: &Version, last_seq: u64, include_active: bool) -> Result<Vec<u8>> {
+    let mut sources: Vec<EntryIter> = Vec::new();
+    let active = include_active.then_some(&v.mem);
+    for slot in active.into_iter().chain(&v.imm) {
+        sources.push(Box::new(MemIter::new(
+            Arc::clone(slot),
+            Bound::Unbounded,
+            Bound::Unbounded,
+        )));
+    }
+    for table in v.l0.iter().chain(&v.l1) {
+        sources.push(Box::new(TableIter::new(
+            Arc::clone(table),
+            Bound::Unbounded,
+            Bound::Unbounded,
+            false,
+        )));
+    }
+    let mut body = Vec::new();
+    let mut count: u64 = 0;
+    for entry in MergeIter::new(sources) {
+        let entry = entry?;
+        if entry.kind == EntryKind::Put && entry.key != snapshot_marker_key() {
+            entry.encode(&mut body);
+            count += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(body.len() + 36);
+    out.extend_from_slice(SNAPSHOT_MAGIC);
+    out.extend_from_slice(&SNAPSHOT_FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&last_seq.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&body);
+    let crc = crc32fast::hash(&out);
+    out.extend_from_slice(&crc.to_le_bytes());
+    Ok(out)
+}
+
 /// After a group commit the batch must be visible; anything else is a bug.
 fn check_visible(published: u64, seq: u64) -> Result<()> {
     if published >= seq {
@@ -818,41 +857,35 @@ impl Engine {
     /// The caller must prevent concurrent writes for a consistent cut.
     pub fn snapshot(&self) -> Result<Vec<u8>> {
         let v = self.inner.current();
-        let mut sources: Vec<EntryIter> = Vec::new();
-        for slot in std::iter::once(&v.mem).chain(&v.imm) {
-            sources.push(Box::new(MemIter::new(
-                Arc::clone(slot),
-                Bound::Unbounded,
-                Bound::Unbounded,
-            )));
-        }
-        for table in v.l0.iter().chain(&v.l1) {
-            sources.push(Box::new(TableIter::new(
-                Arc::clone(table),
-                Bound::Unbounded,
-                Bound::Unbounded,
-                false,
-            )));
-        }
         let last_seq = self.inner.last_seq.load(Ordering::Acquire);
-        let mut body = Vec::new();
-        let mut count: u64 = 0;
-        for entry in MergeIter::new(sources) {
-            let entry = entry?;
-            if entry.kind == EntryKind::Put && entry.key != snapshot_marker_key() {
-                entry.encode(&mut body);
-                count += 1;
+        encode_snapshot(&v, last_seq, true)
+    }
+
+    /// A consistent snapshot taken while writes continue, in the
+    /// [`Engine::snapshot`] format (restore it with
+    /// [`Engine::create_from_snapshot`]).
+    ///
+    /// Writers pause only while pending group-commit batches are published
+    /// and the active memtable is frozen; the snapshot is then read from
+    /// immutable memtables and tables only, at the version reached at that
+    /// moment. Returns the snapshot and that version.
+    pub fn backup(&self) -> Result<(Vec<u8>, u64)> {
+        let (v, last_seq) = {
+            let mut w = self.inner.writer.lock();
+            w.check()?;
+            self.inner.drain(&mut w)?;
+            if !self.inner.current().mem.table.read().is_empty() {
+                self.inner.rotate(&mut w)?;
             }
-        }
-        let mut out = Vec::with_capacity(body.len() + 36);
-        out.extend_from_slice(SNAPSHOT_MAGIC);
-        out.extend_from_slice(&SNAPSHOT_FORMAT_VERSION.to_le_bytes());
-        out.extend_from_slice(&last_seq.to_le_bytes());
-        out.extend_from_slice(&count.to_le_bytes());
-        out.extend_from_slice(&body);
-        let crc = crc32fast::hash(&out);
-        out.extend_from_slice(&crc.to_le_bytes());
-        Ok(out)
+            (
+                self.inner.current(),
+                self.inner.last_seq.load(Ordering::Acquire),
+            )
+        };
+        self.inner.schedule_flush();
+        // The active memtable keeps taking writes after the lock is released;
+        // everything up to `last_seq` is in the frozen memtables and tables.
+        Ok((encode_snapshot(&v, last_seq, false)?, last_seq))
     }
 
     /// Creates a new engine in the empty directory `dir` holding exactly the

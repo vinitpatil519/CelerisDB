@@ -138,6 +138,12 @@ This is a starting point, not a managed offering.
 
 ### Backups
 
-There is no online backup command yet (M9). Until then, snapshot the EBS
-volumes of a stopped node, or of all nodes at once with crash-consistent
-multi-volume snapshots. Recovery replays the write-ahead log.
+* **Single node:** `celeris backup --out file` takes a consistent online
+  snapshot. Copy it to S3; restore with `celeris restore` (see
+  [CLI.md](CLI.md#backups)).
+* **Cluster:** `celeris export` writes every key as JSON lines through the
+  API, and `celeris import` loads it into any cluster. Export needs a
+  `read`-scoped token, import a `write`-scoped one.
+* EBS snapshots also work: snapshot all volumes at once with
+  crash-consistent multi-volume snapshots. Recovery replays the
+  write-ahead log.

@@ -267,6 +267,7 @@ The stream follows these rules:
 | `GET /v1/partitions` | Partition map: epoch, replication factor, per-node replica and leader counts |
 | `GET /v1/partitions/key/{key}` | `{partition, partition_epoch, map_epoch, replicas, leader}` for a key. Lets clients route directly to owners. See [PARTITIONING.md](PARTITIONING.md) |
 | `GET /metrics` | Prometheus text format |
+| `GET /v1/admin/backup` | Admin. A consistent physical snapshot of the node's storage as `application/octet-stream`; the `celeris-version` header holds the last version it contains. `501 not_supported` in replicated cluster mode (use `celeris export`). Restore with `celeris restore` |
 | `POST /v1/admin/shutdown` | Graceful stop. **Loopback clients only** until authentication lands (M9) |
 | `POST /v1/admin/rebalance` | `{"replication_factor": N}`: proposes placing partitions on the current membership through the Raft control plane. Loopback only. The leader answers `202 {"status":"proposed","log_index"}`; a follower forwards the request to the leader and answers `202 {"status":"forwarded","leader"}`; `409 not_leader` only while no leader is known. `/v1/status.control.raft` shows role, term, leader and commit index |
 

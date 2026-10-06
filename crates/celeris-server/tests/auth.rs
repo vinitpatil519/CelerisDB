@@ -162,3 +162,65 @@ async fn watch_accepts_a_query_string_token() {
     let (status, ..) = call(&app, "GET", &uri, None, "").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn backup_needs_admin_and_restores_into_a_new_engine() {
+    let (app, tokens, _dir) = app();
+    for i in 0..20 {
+        let (status, _, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/kv/bk/{i:02}"),
+            Some(&tokens.writer),
+            &format!("{{\"n\":{i}}}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _, _) = call(&app, "GET", "/v1/admin/backup", Some(&tokens.reader), "").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/admin/backup")
+                .header("authorization", format!("Bearer {}", tokens.admin))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let version: u64 = resp
+        .headers()
+        .get(api::VERSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("version header");
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+
+    let restored_dir = tempfile::tempdir().expect("tempdir");
+    let restored = Engine::create_from_snapshot(restored_dir.path(), Options::default(), &bytes)
+        .expect("restore");
+    assert_eq!(restored.stats().last_version, version);
+    for i in 0..20 {
+        let value = restored
+            .get(format!("bk/{i:02}").as_bytes())
+            .expect("get")
+            .expect("restored key");
+        let (_, original, _) = call(
+            &app,
+            "GET",
+            &format!("/v1/kv/bk/{i:02}"),
+            Some(&tokens.reader),
+            "",
+        )
+        .await;
+        assert_eq!(
+            Some(value.version),
+            original["version"].as_u64(),
+            "versions are preserved"
+        );
+    }
+}

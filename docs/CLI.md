@@ -7,6 +7,9 @@ Global flags:
 
 * `--addr <url>`: node address. Default `http://127.0.0.1:8080`, or env `CELERIS_ADDR`.
 * `--json`: print raw JSON responses.
+* `--token <token>`: API token sent as a bearer token. Env `CELERIS_TOKEN`.
+* `--ca-cert <pem>`: trust this CA for `https://` addresses (for
+  self-signed certificates). Env `CELERIS_CA_CERT`.
 
 | Command | What it does |
 |---|---|
@@ -27,6 +30,12 @@ Global flags:
 | `celeris partitions [--key K]` | Partition map summary, or the partition, epoch and replicas for one key |
 | `celeris doctor [--config celeris.toml]` | Check config, data dir, storage lock, port and node health |
 | `celeris bench [--workload put\|get\|mixed] [--ops N] [-c N] [--value-size B] [--keys N]` | Measure p50/p95/p99 latency and throughput (alias: `benchmark`) |
+| `celeris token create <name> --scope read,write,admin` | Print a new random token and the config line holding its hash |
+| `celeris token hash` | Hash a token read from stdin |
+| `celeris backup --out file` | Physical backup of a single node, online and consistent |
+| `celeris restore --from file [--config celeris.toml]` | Build a stopped node's empty data directory from a backup |
+| `celeris export --out file [--prefix p] [--consistency strict]` | Every key as JSON lines, through the API (works on clusters) |
+| `celeris import --from file [--batch-size 200] [--threads 8]` | Load an export. Safe to re-run |
 
 ## Exit codes
 
@@ -114,6 +123,40 @@ set (D-018):
 `ACCEPTED (not yet replicated)`. The write is committed in the background
 (D-023).
 
+## Backups
+
+Two kinds, for different jobs (see `DECISIONS.md` D-029):
+
+| | `backup` / `restore` | `export` / `import` |
+|---|---|---|
+| Form | binary engine snapshot | JSON lines (`key`, `value`, `expires_at_ms`) |
+| Works on | single-node mode | any node or cluster |
+| Versions | kept exactly | reassigned on import |
+| Restore | offline, into an empty data directory | online, through the API |
+
+```bash
+celeris backup --out celeris.backup          # node keeps serving
+celeris stop
+mv data data.old
+celeris restore --from celeris.backup        # reads storage dir from celeris.toml
+celeris start
+```
+
+A backup is a consistent cut: it holds every write acknowledged before the
+command started and nothing torn. Writes during the backup are not
+included.
+
+```bash
+celeris export --out orders.jsonl --prefix orders/
+celeris --addr http://other:8080 import --from orders.jsonl
+```
+
+`import` derives each batch's mutation ID from the file's lines, so
+re-running it after a failure skips what was already applied
+(`... N already imported`). Keys that expired since the export are skipped;
+the others keep their absolute expiry time. An export is not a point-in-time
+snapshot of the whole keyspace: it pages through `scan` (D-010).
+
 ## Not yet available
 
-`celeris backup` arrives with production hardening (M9).
+mTLS on the cluster port (M9).

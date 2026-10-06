@@ -192,6 +192,18 @@ Version 1 files have no snapshot fields (boundary 0) and are still read.
 bytes, the poisoned flag and the last background error. The server will
 export both in Prometheus format.
 
+## Online backup
+
+`Engine::backup()` returns a snapshot (the same format as `snapshot()`) that
+is consistent at a sequence number without stopping writes. Under the
+writer lock it drains group commit and, if the active memtable holds data,
+rotates it. It then releases the lock and encodes only the frozen memtables
+and the SSTables of that version. Later writes land in the new active
+memtable and are not part of the backup. Flushes and compactions may run
+meanwhile: the version holds `Arc`s to its tables, and a table file is
+deleted only when its last reference drops. `Engine::create_from_snapshot`
+restores it into an empty directory with the original versions.
+
 ## Known limitations
 
 * Full compaction (see `DECISIONS.md` D-003): write amplification grows with data size.

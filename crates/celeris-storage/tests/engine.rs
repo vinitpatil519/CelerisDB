@@ -923,3 +923,58 @@ fn group_commit_deduplicates_concurrent_retries() {
     assert_eq!(outcomes.iter().filter(|o| !o.deduplicated).count(), 1);
     assert_eq!(engine.mutation_status(id).expect("status"), Some(first));
 }
+
+/// An online backup is a consistent cut: every write acknowledged before it
+/// started is in it, nothing newer than its version is, and a restored
+/// engine continues from the same versions.
+#[test]
+fn online_backup_is_a_consistent_cut_under_concurrent_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = Arc::new(Engine::open(dir.path(), durable()).expect("open"));
+    for i in 0..200 {
+        engine
+            .write(WriteBatch::new(MutationId::random()).put(format!("pre/{i:03}"), "v"))
+            .expect("write");
+    }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let (engine, stop) = (Arc::clone(&engine), Arc::clone(&stop));
+        thread::spawn(move || {
+            let mut i = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                engine
+                    .write(WriteBatch::new(MutationId::random()).put(format!("live/{i:06}"), "v"))
+                    .expect("write");
+                engine
+                    .write(WriteBatch::new(MutationId::random()).put("pre/000", format!("{i}")))
+                    .expect("overwrite");
+                i += 1;
+            }
+        })
+    };
+    thread::sleep(Duration::from_millis(50));
+    let (snapshot, version) = engine.backup().expect("backup");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().expect("join");
+
+    let restored_dir = tempfile::tempdir().expect("tempdir");
+    let restored =
+        Engine::create_from_snapshot(restored_dir.path(), durable(), &snapshot).expect("restore");
+    let keys = all_keys(&restored);
+    for i in 0..200 {
+        assert!(keys.contains(&format!("pre/{i:03}")), "pre/{i:03} missing");
+    }
+    let records = restored
+        .scan(Bound::Unbounded, Bound::Unbounded, usize::MAX)
+        .expect("scan");
+    assert!(
+        records.iter().all(|r| r.version <= version),
+        "nothing newer than the cut"
+    );
+    // The overwritten key is present at some version within the cut.
+    assert!(records.iter().any(|r| r.key == b"pre/000"));
+    let next = restored
+        .write(WriteBatch::new(MutationId::random()).put("after", "x"))
+        .expect("write after restore");
+    assert!(next.version > version, "versions continue after the cut");
+}

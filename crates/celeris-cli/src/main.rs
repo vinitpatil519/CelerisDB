@@ -3,6 +3,7 @@
 //! Exit codes: 0 success, 1 error, 2 usage error, 3 write outcome unknown
 //! (it may have committed; resolve with `celeris mutation <id>`), 4 not found.
 
+mod backup;
 mod bench;
 mod client;
 mod doctor;
@@ -164,6 +165,44 @@ enum Command {
     /// Manage API tokens.
     #[command(subcommand)]
     Token(TokenCommand),
+    /// Save a consistent physical backup of a single node (exact versions).
+    Backup {
+        /// File to write.
+        #[arg(long, short)]
+        out: PathBuf,
+    },
+    /// Build a stopped node's empty storage from a physical backup.
+    Restore {
+        /// Backup file written by `celeris backup`.
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long, short, default_value = config::FILE_NAME)]
+        config: PathBuf,
+    },
+    /// Export keys as JSON lines through the API (any cluster, online).
+    Export {
+        /// File to write.
+        #[arg(long, short)]
+        out: PathBuf,
+        /// Only keys with this prefix.
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Read consistency for the scan.
+        #[arg(long, default_value = "strict")]
+        consistency: String,
+    },
+    /// Import a JSON-lines export (idempotent: safe to re-run).
+    Import {
+        /// File written by `celeris export`.
+        #[arg(long)]
+        from: PathBuf,
+        /// Keys per batch.
+        #[arg(long, default_value_t = 200)]
+        batch_size: usize,
+        /// Parallel writers when a batch spans replica sets.
+        #[arg(long, default_value_t = 8)]
+        threads: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -460,6 +499,21 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }),
         Command::Bench(args) => bench::run(&cli.addr, &args, json).map(|()| ExitCode::SUCCESS),
         Command::Token(TokenCommand::Create { name, scopes }) => token_create(&name, &scopes),
+        Command::Backup { out } => backup::backup(&client, &out).map(|()| ExitCode::SUCCESS),
+        Command::Restore { from, config } => {
+            backup::restore(&config, &from).map(|()| ExitCode::SUCCESS)
+        }
+        Command::Export {
+            out,
+            prefix,
+            consistency,
+        } => backup::export(&client, &out, prefix.as_deref(), &consistency)
+            .map(|()| ExitCode::SUCCESS),
+        Command::Import {
+            from,
+            batch_size,
+            threads,
+        } => backup::import(&client, &from, batch_size, threads).map(|()| ExitCode::SUCCESS),
         Command::Token(TokenCommand::Hash) => {
             let mut token = String::new();
             std::io::stdin().read_line(&mut token)?;

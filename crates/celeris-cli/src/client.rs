@@ -133,6 +133,27 @@ impl Client {
         &self.base
     }
 
+    /// GETs raw bytes: (status, body, `celeris-version` header).
+    pub fn download(&self, path: &str) -> Result<(u16, Vec<u8>, Option<String>), Failure> {
+        use std::io::Read;
+        let mut req = self.agent.get(&format!("{}{path}", self.base));
+        if let Some(token) = &self.token {
+            req = req.set("authorization", &format!("Bearer {token}"));
+        }
+        let resp = match req.call() {
+            Ok(r) | Err(ureq::Error::Status(_, r)) => r,
+            Err(ureq::Error::Transport(t)) => return Err(Failure::NotSent(t.to_string())),
+        };
+        let status = resp.status();
+        let version = resp.header("celeris-version").map(str::to_owned);
+        let mut bytes = Vec::new();
+        resp.into_reader()
+            .take(2 * 1024 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .map_err(|e| Failure::MaybeSent(format!("reading response: {e}")))?;
+        Ok((status, bytes, version))
+    }
+
     pub fn send(
         &self,
         method: &str,

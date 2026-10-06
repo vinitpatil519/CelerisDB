@@ -261,6 +261,7 @@ Not done: resumable change streams (from a log position).
   CLI `--token`, `celeris token create`, SDK `token` options, console field.
 * [x] TLS for the client API (D-028): HTTPS + wss, CLI `--ca-cert`.
 * [ ] TLS (mTLS) on the cluster port.
-* [ ] Online backup and restore.
+* [x] Online backup and restore (D-029): consistent physical snapshots for
+  a single node, JSON-lines export/import for any cluster.
 * [ ] Criterion micro-benchmarks for the storage engine.
 * [ ] Chaos suite beyond the current crash, failover and partition tests.

@@ -58,6 +58,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/partitions/key/{*key}", get(partition_for_key))
         .route("/v1/admin/shutdown", post(shutdown))
         .route("/v1/admin/rebalance", post(rebalance))
+        .route("/v1/admin/backup", get(backup))
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
@@ -1308,6 +1309,43 @@ async fn metrics(State(node): State<AppState>) -> Result<Response, ApiError> {
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         text,
+    )
+        .into_response())
+}
+
+/// A consistent physical backup of this node's storage (single-node mode),
+/// in the engine snapshot format. Restore it with `celeris restore`.
+/// Replicated clusters are backed up logically with `celeris export`.
+async fn backup(
+    State(node): State<AppState>,
+    peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
+) -> Result<Response, ApiError> {
+    admin_allowed(&node, &peer)?;
+    if node.is_replicated() {
+        return Err(ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "not_supported",
+            "physical backups cover a single node; back up a replicated cluster with `celeris export`",
+        ));
+    }
+    let (snapshot, version) = node
+        .blocking(|engine| engine.backup())
+        .await
+        .map_err(|e| ApiError::internal(format!("backup task failed: {e}")))?
+        .map_err(|e| ApiError::internal(format!("backup failed: {e}")))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"celeris-{}-v{version}.backup\"",
+                    node.id()
+                ),
+            ),
+            (HeaderName::from_static(VERSION_HEADER), version.to_string()),
+        ],
+        snapshot,
     )
         .into_response())
 }
