@@ -295,6 +295,9 @@ pub struct QueryOptions {
     pub fields: Option<Vec<String>>,
     /// Rows each request may read on the server (default 10000).
     pub max_scanned: Option<u32>,
+    /// Aggregate the matches instead of returning them, e.g.
+    /// `json!({"count": true, "sum": ["total"], "max": ["created"]})`.
+    pub aggregate: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -307,6 +310,8 @@ pub struct QueryPage<T> {
     pub scanned: u64,
     /// The secondary index that served the page (`None`: a scan).
     pub index: Option<String>,
+    /// With `aggregate`: this page's partial aggregates.
+    pub aggregates: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -725,6 +730,7 @@ impl Client {
         set("where", options.filter.clone());
         set("fields", options.fields.clone().map(Into::into));
         set("max_scanned", options.max_scanned.map(Into::into));
+        set("aggregate", options.aggregate.clone());
         set("after", after.map(Into::into));
         let body = serde_json::to_vec(&body).map_err(|e| Error::Decode(e.to_string()))?;
         let raw = self
@@ -744,6 +750,7 @@ impl Client {
             partial: raw.body["partial"].as_bool().unwrap_or(false),
             scanned: raw.body["scanned"].as_u64().unwrap_or(0),
             index: raw.body["index"].as_str().map(str::to_owned),
+            aggregates: raw.body.get("aggregates").cloned(),
         })
     }
 
@@ -760,6 +767,28 @@ impl Client {
             match page.next_cursor {
                 Some(cursor) => after = Some(cursor),
                 None => return Ok(out),
+            }
+        }
+    }
+
+    /// Aggregates every match (`options.aggregate` must be set), following
+    /// cursors to the end of the range and merging the pages with
+    /// [`merge_aggregates`].
+    pub async fn aggregate(&self, options: &QueryOptions) -> Result<serde_json::Value> {
+        let mut total: Option<serde_json::Value> = None;
+        let mut after: Option<String> = None;
+        loop {
+            let page = self
+                .query_page::<serde_json::Value>(options, after.as_deref())
+                .await?;
+            let part = page.aggregates.unwrap_or_else(|| serde_json::json!({}));
+            match &mut total {
+                Some(t) => merge_aggregates(t, &part),
+                None => total = Some(part),
+            }
+            match page.next_cursor {
+                Some(cursor) => after = Some(cursor),
+                None => return Ok(total.unwrap_or_default()),
             }
         }
     }
@@ -1124,6 +1153,50 @@ impl Watch {
     pub async fn close(mut self) {
         let _ = self.socket.send(Message::Close(None)).await;
         let _ = self.socket.close(None).await;
+    }
+}
+
+/// Folds one page's aggregates into running totals: counts and sums add;
+/// min and max keep the extreme (numbers order before strings).
+pub fn merge_aggregates(total: &mut serde_json::Value, page: &serde_json::Value) {
+    use serde_json::Value;
+    use std::cmp::Ordering;
+    let rank = |a: &Value, b: &Value| match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .partial_cmp(&y.as_f64())
+            .unwrap_or(Ordering::Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Number(_), _) => Ordering::Less,
+        _ => Ordering::Greater,
+    };
+    if let Some(c) = page["count"].as_u64() {
+        total["count"] = (total["count"].as_u64().unwrap_or(0) + c).into();
+    }
+    if let Some(sums) = page["sum"].as_object() {
+        for (field, v) in sums {
+            let t = total["sum"][field].clone();
+            total["sum"][field] = match (t.as_i64(), v.as_i64()) {
+                (Some(a), Some(b)) => a
+                    .checked_add(b)
+                    .map_or_else(|| Value::from(a as f64 + b as f64), Value::from),
+                _ => match (t.as_f64(), v.as_f64()) {
+                    (Some(a), Some(b)) => Value::from(a + b),
+                    (None, _) => v.clone(),
+                    (Some(_), None) => t,
+                },
+            };
+        }
+    }
+    for (key, keep) in [("min", Ordering::Less), ("max", Ordering::Greater)] {
+        if let Some(values) = page[key].as_object() {
+            for (field, v) in values {
+                let t = &total[key][field];
+                if t.is_null() || (!v.is_null() && rank(v, t) == keep) {
+                    total[key][field] = v.clone();
+                }
+            }
+        }
     }
 }
 

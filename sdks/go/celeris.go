@@ -191,6 +191,9 @@ type QueryOptions struct {
 	Fields []string
 	// MaxScanned caps the rows each request reads (server default 10000).
 	MaxScanned int
+	// Aggregate the matches instead of returning them, e.g.
+	// map[string]any{"count": true, "sum": []string{"total"}}.
+	Aggregate map[string]any
 }
 
 // QueryPage is one page of a query. NextCursor is set while the range is
@@ -201,6 +204,8 @@ type QueryPage struct {
 	Scanned uint64
 	// Index is the secondary index that served the page ("" for a scan).
 	Index string
+	// Aggregates holds this page's partial aggregates (with Aggregate).
+	Aggregates map[string]any
 }
 
 // Conflict is a write that lost last-writer-wins under available consistency.
@@ -520,6 +525,9 @@ func (c *Client) QueryPage(ctx context.Context, opts *QueryOptions, after string
 	if len(opts.Fields) > 0 {
 		req["fields"] = opts.Fields
 	}
+	if opts.Aggregate != nil {
+		req["aggregate"] = opts.Aggregate
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -537,12 +545,13 @@ func (c *Client) QueryPage(ctx context.Context, opts *QueryOptions, after string
 		Partial     bool              `json:"partial"`
 		Scanned     uint64            `json:"scanned"`
 		Index       *string           `json:"index"`
+		Aggregates  map[string]any    `json:"aggregates"`
 		Consistency string            `json:"consistency"`
 	}
 	if err := json.Unmarshal(raw.body, &page); err != nil {
 		return nil, err
 	}
-	out := &QueryPage{ScanPage: ScanPage{Partial: page.Partial}, Scanned: page.Scanned}
+	out := &QueryPage{ScanPage: ScanPage{Partial: page.Partial}, Scanned: page.Scanned, Aggregates: page.Aggregates}
 	if page.Index != nil {
 		out.Index = *page.Index
 	}
@@ -577,6 +586,94 @@ func (c *Client) Query(ctx context.Context, opts *QueryOptions, fn func(Item) bo
 			return nil
 		}
 		after = page.NextCursor
+	}
+}
+
+// Aggregate aggregates every match (opts.Aggregate must be set), following
+// cursors to the end of the range and merging pages with MergeAggregates.
+func (c *Client) Aggregate(ctx context.Context, opts *QueryOptions) (map[string]any, error) {
+	var total map[string]any
+	after := ""
+	for {
+		page, err := c.QueryPage(ctx, opts, after)
+		if err != nil {
+			return nil, err
+		}
+		part := page.Aggregates
+		if part == nil {
+			part = map[string]any{}
+		}
+		if total == nil {
+			total = part
+		} else {
+			MergeAggregates(total, part)
+		}
+		if page.NextCursor == "" {
+			return total, nil
+		}
+		after = page.NextCursor
+	}
+}
+
+// MergeAggregates folds one page's aggregates into total: counts and sums
+// add; min and max keep the extreme (numbers order before strings).
+func MergeAggregates(total, page map[string]any) {
+	if c, ok := page["count"].(float64); ok {
+		t, _ := total["count"].(float64)
+		total["count"] = t + c
+	}
+	section := func(key string) map[string]any {
+		m, ok := total[key].(map[string]any)
+		if !ok {
+			m = map[string]any{}
+			total[key] = m
+		}
+		return m
+	}
+	if sums, ok := page["sum"].(map[string]any); ok {
+		t := section("sum")
+		for field, v := range sums {
+			n, ok := v.(float64)
+			if !ok {
+				if _, seen := t[field]; !seen {
+					t[field] = nil
+				}
+				continue
+			}
+			prev, _ := t[field].(float64)
+			t[field] = prev + n
+		}
+	}
+	less := func(a, b any) bool {
+		switch x := a.(type) {
+		case float64:
+			y, ok := b.(float64)
+			return !ok || x < y
+		case string:
+			y, ok := b.(string)
+			return ok && x < y
+		}
+		return false
+	}
+	for _, key := range []string{"min", "max"} {
+		values, ok := page[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		t := section(key)
+		for field, v := range values {
+			cur, seen := t[field]
+			switch {
+			case v == nil:
+				if !seen {
+					t[field] = nil
+				}
+			case cur == nil:
+				t[field] = v
+			case key == "min" && less(v, cur), key == "max" && less(cur, v):
+				t[field] = v
+			}
+		}
 	}
 }
 

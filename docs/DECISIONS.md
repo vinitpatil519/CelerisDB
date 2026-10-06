@@ -225,6 +225,25 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-032 Mergeable aggregates, no server-side sort
+
+* **Count, sum, min, max.** These are the aggregates that merge exactly
+  across pages and replica sets, so they fit the bounded-page model of
+  D-030 unchanged. Each response aggregates one page (at most `max_scanned`
+  rows) and returns the cursor; clients fold the pages. Averages are
+  sum / count on the client.
+* **Computed at the coordinator.** In a cluster, groups return matching
+  records as for any query, and the coordinator aggregates the merged
+  page. That keeps the gap-free cutoff of D-030 correct without
+  per-record bookkeeping in partial aggregates. It costs network traffic
+  that pushing partial aggregates down would save; that is a later
+  optimization.
+* **Defined ordering.** Numbers order before strings and other types are
+  skipped, so `min` and `max` are deterministic over mixed data.
+* **No sort.** A sort over a whole range cannot be answered in bounded
+  pages without an index ordered by that field, so results stay in key
+  order. Range indexes would enable it later.
+
 ## D-031 Secondary indexes maintained by the storage engine
 
 * **In the engine, inside the write.** Each index entry is a reserved key

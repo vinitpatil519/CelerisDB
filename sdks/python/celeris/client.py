@@ -102,6 +102,8 @@ class QueryPage(ScanPage):
     scanned: int = 0
     #: The secondary index that served the page, or ``None`` for a scan.
     index: str | None = None
+    #: With ``aggregate``: this page's partial aggregates.
+    aggregates: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +315,7 @@ class Client:
         *,
         where: Mapping[str, Any] | None = None,
         fields: list[str] | None = None,
+        aggregate: Mapping[str, Any] | None = None,
         prefix: str | None = None,
         start: str | None = None,
         end: str | None = None,
@@ -333,6 +336,7 @@ class Client:
             for k, v in {
                 "where": where,
                 "fields": fields,
+                "aggregate": aggregate,
                 "prefix": prefix,
                 "start": start,
                 "end": end,
@@ -352,6 +356,7 @@ class Client:
             partial=bool(raw.body.get("partial")),
             scanned=int(raw.body.get("scanned", 0)),
             index=raw.body.get("index"),
+            aggregates=raw.body.get("aggregates"),
         )
 
     def query(self, **options: Any) -> Iterator[Item]:
@@ -365,6 +370,23 @@ class Client:
             yield from page.items
             if page.next_cursor is None:
                 return
+            after = page.next_cursor
+
+    def aggregate(self, aggregate: Mapping[str, Any], **options: Any) -> dict[str, Any]:
+        """Aggregates every match, following cursors and merging the pages.
+
+        ``aggregate`` is ``{"count": True, "sum": [...], "min": [...],
+        "max": [...]}``; the other keyword arguments are those of
+        :meth:`query_page` except ``after``.
+        """
+        total: dict[str, Any] | None = None
+        after = None
+        while True:
+            page = self.query_page(aggregate=aggregate, after=after, **options)
+            part = page.aggregates or {}
+            total = part if total is None else merge_aggregates(total, part)
+            if page.next_cursor is None:
+                return total
             after = page.next_cursor
 
     # -- mutations, conflicts, status --------------------------------------
@@ -612,3 +634,29 @@ class _NotSent(OSError):
 
 def _backoff(attempt: int, base: float) -> None:
     time.sleep(base * (attempt + 1) * (0.5 + random.random()))
+
+
+def merge_aggregates(total: dict[str, Any], page: dict[str, Any]) -> dict[str, Any]:
+    """Folds one page's aggregates into running totals: counts and sums add;
+    min and max keep the extreme (numbers order before strings)."""
+    out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in total.items()}
+    if "count" in page:
+        out["count"] = out.get("count", 0) + page["count"]
+    for field, v in page.get("sum", {}).items():
+        sums = out.setdefault("sum", {})
+        if v is not None:
+            sums[field] = (sums.get(field) or 0) + v
+        else:
+            sums.setdefault(field, None)
+
+    def rank(v: Any) -> tuple[int, Any]:
+        return (0, v) if isinstance(v, (int, float)) else (1, v)
+
+    for key, better in (("min", lambda a, b: rank(a) < rank(b)), ("max", lambda a, b: rank(a) > rank(b))):
+        for field, v in page.get(key, {}).items():
+            values = out.setdefault(key, {})
+            if v is not None and (values.get(field) is None or better(v, values[field])):
+                values[field] = v
+            else:
+                values.setdefault(field, None)
+    return out

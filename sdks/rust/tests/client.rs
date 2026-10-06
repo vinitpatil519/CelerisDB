@@ -286,6 +286,23 @@ async fn queries_filter_and_project_on_the_server() {
         .await
         .expect_err("bad filter");
     assert_eq!(err.code(), Some("invalid_filter"));
+
+    let agg = db
+        .aggregate(&QueryOptions {
+            range: ScanOptions {
+                prefix: Some("q/".into()),
+                ..Default::default()
+            },
+            max_scanned: Some(5),
+            aggregate: Some(json!({"count": true, "sum": ["n"], "min": ["n"], "max": ["n"]})),
+            ..Default::default()
+        })
+        .await
+        .expect("aggregate");
+    assert_eq!(
+        agg,
+        json!({"count": 12, "sum": {"n": 66}, "min": {"n": 0}, "max": {"n": 11}})
+    );
 }
 
 #[tokio::test]

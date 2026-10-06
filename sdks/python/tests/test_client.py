@@ -123,6 +123,11 @@ def test_query_filters_and_projects_on_the_server(client):
         client.query_page(where={"n": {"$nope": 1}})
     assert err.value.code == "invalid_filter"
 
+    agg = client.aggregate(
+        {"count": True, "sum": ["n"], "min": ["n"], "max": ["n"]}, prefix="q/", max_scanned=5
+    )
+    assert agg == {"count": 12, "sum": {"n": 66}, "min": {"n": 0}, "max": {"n": 11}}
+
 
 def test_watch_streams_matching_changes(client):
     with client.watch("live/") as watch:

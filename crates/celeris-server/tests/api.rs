@@ -914,3 +914,69 @@ async fn equality_queries_use_a_ready_secondary_index() {
     assert_eq!(r.body["index"], Value::Null);
     assert_eq!(r.body["items"].as_array().map(Vec::len), Some(10));
 }
+
+#[tokio::test]
+async fn aggregates_merge_across_pages() {
+    let t = test_node();
+    let json_header = [("content-type", "application/json")];
+    for i in 0..25 {
+        let doc = json!({"paid": i % 2 == 0, "total": i, "city": format!("c{}", i % 7)});
+        call(
+            &t.app,
+            "PUT",
+            &format!("/v1/kv/sales/{i:02}"),
+            &json_header,
+            Some(&doc.to_string()),
+        )
+        .await;
+    }
+    let (mut count, mut sum, mut max_city) = (0u64, 0i64, String::new());
+    let mut after = Value::Null;
+    let mut pages = 0;
+    loop {
+        let body = json!({
+            "prefix": "sales/",
+            "where": {"paid": true},
+            "aggregate": {"count": true, "sum": ["total"], "max": ["city"]},
+            "max_scanned": 6,
+            "after": after,
+        });
+        let r = call(
+            &t.app,
+            "POST",
+            "/v1/query",
+            &json_header,
+            Some(&body.to_string()),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert_eq!(r.body["items"], json!([]));
+        let agg = &r.body["aggregates"];
+        count += agg["count"].as_u64().expect("count");
+        sum += agg["sum"]["total"].as_i64().unwrap_or(0);
+        if let Some(c) = agg["max"]["city"].as_str()
+            && c > max_city.as_str()
+        {
+            max_city = c.to_owned();
+        }
+        pages += 1;
+        if r.body["next_cursor"].is_null() {
+            break;
+        }
+        after = r.body["next_cursor"].clone();
+    }
+    assert!(pages >= 5);
+    assert_eq!(count, 13);
+    assert_eq!(sum, (0..25).step_by(2).sum::<i64>());
+    assert_eq!(max_city, "c6");
+
+    let r = call(
+        &t.app,
+        "POST",
+        "/v1/query",
+        &json_header,
+        Some(r#"{"aggregate":{"avg":["total"]}}"#),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+}

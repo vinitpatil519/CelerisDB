@@ -289,6 +289,143 @@ fn copy_path(src: &Value, dst: &mut Value, path: &[String]) {
     copy_path(child, slot, rest);
 }
 
+/// Aggregates over the matches of a query (D-032): `count`, and `sum`,
+/// `min` and `max` of named fields. All four merge across pages, so a
+/// client folds the partial results of every page into the total.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Aggregates {
+    count: Option<u64>,
+    sum: Vec<(String, Vec<String>, Option<Sum>)>,
+    min: Vec<(String, Vec<String>, Option<Value>)>,
+    max: Vec<(String, Vec<String>, Option<Value>)>,
+}
+
+/// Integers add exactly until a float or an overflow appears.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Sum {
+    Int(i64),
+    Float(f64),
+}
+
+impl Sum {
+    fn add(self, n: &serde_json::Number) -> Sum {
+        match (self, n.as_i64()) {
+            (Sum::Int(a), Some(b)) => a
+                .checked_add(b)
+                .map_or(Sum::Float(a as f64 + b as f64), Sum::Int),
+            (Sum::Int(a), None) => Sum::Float(a as f64 + n.as_f64().unwrap_or(0.0)),
+            (Sum::Float(a), _) => Sum::Float(a + n.as_f64().unwrap_or(0.0)),
+        }
+    }
+
+    fn to_json(self) -> Value {
+        match self {
+            Sum::Int(i) => Value::from(i),
+            Sum::Float(f) => serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number),
+        }
+    }
+}
+
+/// Orders values for `min` / `max`: numbers by value, then strings.
+/// Other types are ignored.
+fn rank(a: &Value, b: &Value) -> Ordering {
+    match (a, b) {
+        (Value::Number(_), Value::String(_)) => Ordering::Less,
+        (Value::String(_), Value::Number(_)) => Ordering::Greater,
+        _ => order(a, b).unwrap_or(Ordering::Equal),
+    }
+}
+
+impl Aggregates {
+    /// Parses `{"count": true, "sum": ["total"], "min": [...], "max": [...]}`.
+    pub fn parse(doc: &Value) -> Result<Aggregates, String> {
+        let Value::Object(map) = doc else {
+            return Err("aggregate must be an object".into());
+        };
+        let mut out = Aggregates::default();
+        for (name, arg) in map {
+            match name.as_str() {
+                "count" => match arg {
+                    Value::Bool(true) => out.count = Some(0),
+                    Value::Bool(false) => {}
+                    _ => return Err("aggregate.count takes true or false".into()),
+                },
+                "sum" | "min" | "max" => {
+                    let Value::Array(fields) = arg else {
+                        return Err(format!("aggregate.{name} takes an array of field paths"));
+                    };
+                    for f in fields {
+                        let Some(f) = f.as_str() else {
+                            return Err(format!("aggregate.{name} takes field paths"));
+                        };
+                        let path = parse_path(f)?;
+                        match name.as_str() {
+                            "sum" => out.sum.push((f.to_owned(), path, None)),
+                            "min" => out.min.push((f.to_owned(), path, None)),
+                            _ => out.max.push((f.to_owned(), path, None)),
+                        }
+                    }
+                }
+                other => return Err(format!("unknown aggregate {other}")),
+            }
+        }
+        if out.count.is_none() && out.sum.is_empty() && out.min.is_empty() && out.max.is_empty() {
+            return Err("aggregate needs count, sum, min or max".into());
+        }
+        Ok(out)
+    }
+
+    pub fn add(&mut self, value: &Value) {
+        if let Some(c) = &mut self.count {
+            *c += 1;
+        }
+        for (_, path, acc) in &mut self.sum {
+            if let Some(Value::Number(n)) = lookup(value, path) {
+                *acc = Some(acc.unwrap_or(Sum::Int(0)).add(n));
+            }
+        }
+        for (list, keep) in [
+            (&mut self.min, Ordering::Less),
+            (&mut self.max, Ordering::Greater),
+        ] {
+            for (_, path, acc) in list.iter_mut() {
+                if let Some(v @ (Value::Number(_) | Value::String(_))) = lookup(value, path)
+                    && acc.as_ref().is_none_or(|a| rank(v, a) == keep)
+                {
+                    *acc = Some(v.clone());
+                }
+            }
+        }
+    }
+
+    /// `{"count": n, "sum": {"total": …}, "min": {…}, "max": {…}}`. A field
+    /// with no numeric (or comparable) values is `null`.
+    pub fn to_json(&self) -> Value {
+        let mut out = Map::new();
+        if let Some(c) = self.count {
+            out.insert("count".into(), Value::from(c));
+        }
+        if !self.sum.is_empty() {
+            let sums = self
+                .sum
+                .iter()
+                .map(|(name, _, acc)| (name.clone(), acc.map_or(Value::Null, Sum::to_json)))
+                .collect();
+            out.insert("sum".into(), Value::Object(sums));
+        }
+        for (key, list) in [("min", &self.min), ("max", &self.max)] {
+            if !list.is_empty() {
+                let values = list
+                    .iter()
+                    .map(|(name, _, acc)| (name.clone(), acc.clone().unwrap_or(Value::Null)))
+                    .collect();
+                out.insert(key.into(), Value::Object(values));
+            }
+        }
+        Value::Object(out)
+    }
+}
+
 /// The result of filtering one key range.
 #[derive(Debug, Default)]
 pub struct FilteredScan {
@@ -571,6 +708,43 @@ mod tests {
             deep = json!({"$not": deep});
         }
         assert!(Filter::parse(&deep).is_err());
+    }
+
+    #[test]
+    fn aggregates_fold_and_report() {
+        let mut agg = Aggregates::parse(&json!({
+            "count": true, "sum": ["total", "missing"], "min": ["total", "name"], "max": ["total"]
+        }))
+        .expect("aggregate");
+        for doc in [
+            json!({"total": 3, "name": "b"}),
+            json!({"total": 2.5, "name": "a"}),
+            json!({"total": "n/a"}),
+            json!({"other": 1}),
+        ] {
+            agg.add(&doc);
+        }
+        assert_eq!(
+            agg.to_json(),
+            json!({
+                "count": 4,
+                "sum": {"total": 5.5, "missing": null},
+                "min": {"total": 2.5, "name": "a"},
+                "max": {"total": "n/a"},
+            })
+        );
+        let mut ints = Aggregates::parse(&json!({"sum": ["n"]})).expect("aggregate");
+        ints.add(&json!({"n": 2}));
+        ints.add(&json!({"n": 3}));
+        assert_eq!(ints.to_json(), json!({"sum": {"n": 5}}));
+        for bad in [
+            json!({}),
+            json!({"avg": ["n"]}),
+            json!({"count": 1}),
+            json!({"sum": "n"}),
+        ] {
+            assert!(Aggregates::parse(&bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

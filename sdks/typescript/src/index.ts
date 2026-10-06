@@ -110,6 +110,24 @@ export interface QueryOptions extends ScanOptions {
   fields?: string[];
   /** Rows each request may read on the server (default 10000). */
   maxScanned?: number;
+  /** Aggregate the matches instead of returning them. */
+  aggregate?: AggregateSpec;
+}
+
+export interface AggregateSpec {
+  count?: boolean;
+  /** Numeric fields to sum. */
+  sum?: string[];
+  min?: string[];
+  max?: string[];
+}
+
+/** `{ count, sum: { field: n }, min: { field: v }, max: { field: v } }`. */
+export interface Aggregates {
+  count?: number;
+  sum?: Record<string, number | null>;
+  min?: Record<string, number | string | null>;
+  max?: Record<string, number | string | null>;
 }
 
 export interface QueryPage<T = unknown> extends ScanPage<T> {
@@ -117,6 +135,8 @@ export interface QueryPage<T = unknown> extends ScanPage<T> {
   scanned: number;
   /** The secondary index that served the page, or `null` for a scan. */
   index: string | null;
+  /** With `aggregate`: this page's partial aggregates. */
+  aggregates: Aggregates | null;
 }
 
 export interface Conflict {
@@ -339,6 +359,7 @@ export class Client {
       limit: options.limit,
       where: options.where,
       fields: options.fields,
+      aggregate: options.aggregate,
       max_scanned: options.maxScanned,
       consistency: options.consistency ?? this.options.consistency,
       after,
@@ -351,6 +372,7 @@ export class Client {
       partial: Boolean(raw.body.partial),
       scanned: raw.body.scanned ?? 0,
       index: raw.body.index ?? null,
+      aggregates: raw.body.aggregates ?? null,
     };
   }
 
@@ -361,6 +383,22 @@ export class Client {
       const page: QueryPage<T> = await this.queryPage<T>(options, after);
       yield* page.items;
       if (page.nextCursor === null) return;
+      after = page.nextCursor;
+    }
+  }
+
+  /**
+   * Aggregates every match of a query, following cursors to the end of the
+   * range and merging the pages: counts and sums add, min and max keep the
+   * extreme (numbers order before strings).
+   */
+  async aggregate(options: QueryOptions & { aggregate: AggregateSpec }): Promise<Aggregates> {
+    let total: Aggregates | null = null;
+    let after: string | undefined;
+    for (;;) {
+      const page = await this.queryPage(options, after);
+      total = total ? mergeAggregates(total, page.aggregates ?? {}) : (page.aggregates ?? {});
+      if (page.nextCursor === null) return total;
       after = page.nextCursor;
     }
   }
@@ -566,3 +604,31 @@ function toItem<T>(body: any): Item<T> {
 }
 export { createKeyStore } from "./store.js";
 export type { KeyState, KeyStore } from "./store.js";
+
+/** Folds one page's aggregates into running totals. */
+export function mergeAggregates(total: Aggregates, page: Aggregates): Aggregates {
+  const out: Aggregates = {
+    ...total,
+    sum: { ...total.sum },
+    min: { ...total.min },
+    max: { ...total.max },
+  };
+  if (page.count !== undefined) out.count = (total.count ?? 0) + page.count;
+  for (const [field, v] of Object.entries(page.sum ?? {})) {
+    const t = out.sum![field];
+    out.sum![field] = v === null ? (t ?? null) : (t ?? 0) + v;
+  }
+  const rank = (a: number | string, b: number | string): number =>
+    typeof a === typeof b ? (a < b ? -1 : a > b ? 1 : 0) : typeof a === "number" ? -1 : 1;
+  for (const key of ["min", "max"] as const) {
+    for (const [field, v] of Object.entries(page[key] ?? {})) {
+      const t = out[key]![field];
+      if (v === null) continue;
+      if (t === null || t === undefined || (key === "min" ? rank(v, t) < 0 : rank(v, t) > 0)) out[key]![field] = v;
+    }
+  }
+  if (total.sum === undefined && page.sum === undefined) delete out.sum;
+  if (total.min === undefined && page.min === undefined) delete out.min;
+  if (total.max === undefined && page.max === undefined) delete out.max;
+  return out;
+}

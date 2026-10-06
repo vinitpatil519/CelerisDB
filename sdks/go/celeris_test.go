@@ -207,6 +207,15 @@ func TestQuery(t *testing.T) {
 	if !IsCode(err, "invalid_filter") {
 		t.Fatalf("bad filter: %v", err)
 	}
+	agg, err := c.Aggregate(ctx, &QueryOptions{
+		ScanOptions: ScanOptions{Prefix: p},
+		MaxScanned:  5,
+		Aggregate:   map[string]any{"count": true, "sum": []string{"n"}, "min": []string{"n"}, "max": []string{"n"}},
+	})
+	if err != nil || agg["count"] != 12.0 || agg["sum"].(map[string]any)["n"] != 66.0 ||
+		agg["min"].(map[string]any)["n"] != 0.0 || agg["max"].(map[string]any)["n"] != 11.0 {
+		t.Fatalf("aggregate: %v %v", agg, err)
+	}
 }
 
 func TestWatch(t *testing.T) {

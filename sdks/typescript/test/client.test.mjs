@@ -151,6 +151,13 @@ describe("queries", () => {
     assert.deepEqual(all, ["q/00", "q/01", "q/02", "q/03", "q/04"]);
 
     await assert.rejects(client.queryPage({ where: { n: { $nope: 1 } } }), { code: "invalid_filter" });
+
+    const agg = await client.aggregate({
+      prefix: "q/",
+      maxScanned: 5,
+      aggregate: { count: true, sum: ["n"], min: ["n"], max: ["n"] },
+    });
+    assert.deepEqual(agg, { count: 12, sum: { n: 66 }, min: { n: 0 }, max: { n: 11 } });
   });
 });
 

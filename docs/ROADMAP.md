@@ -275,4 +275,6 @@ Not done: resumable change streams (from a log position).
   `queryPage` in all four SDKs.
 * [x] Secondary indexes on JSON fields (D-031): engine-maintained, built
   and dropped in replicated steps, used by equality filters.
-* [ ] Sorting by a field and aggregates (count, sum, min, max).
+* [x] Aggregates (D-032): count, sum, min and max per page, merged by the
+  CLI (`--count --sum --min --max --all`) and the SDKs' `aggregate` helpers.
+* [ ] Sorting by a field (needs range indexes).

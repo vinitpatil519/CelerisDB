@@ -898,6 +898,7 @@ struct QueryRequest {
     #[serde(rename = "where")]
     filter: Option<Value>,
     fields: Option<Vec<String>>,
+    aggregate: Option<Value>,
     limit: Option<usize>,
     max_scanned: Option<usize>,
     consistency: Option<String>,
@@ -922,6 +923,9 @@ struct QueryResponse {
     scanned: usize,
     /// The secondary index that served the page, or `null` for a scan.
     index: Option<String>,
+    /// With `aggregate`: count, sum, min and max over this page's matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aggregates: Option<Value>,
     consistency: &'static str,
     partial: bool,
 }
@@ -960,6 +964,18 @@ async fn query(
         .map(crate::query::parse_fields)
         .transpose()
         .map_err(|e| ApiError::bad_request("invalid_argument", e))?;
+    let mut aggregates = req
+        .aggregate
+        .as_ref()
+        .map(crate::query::Aggregates::parse)
+        .transpose()
+        .map_err(|e| ApiError::bad_request("invalid_argument", e))?;
+    // An aggregate page is bounded by the scan budget only.
+    let limit = if aggregates.is_some() {
+        max_scanned
+    } else {
+        limit
+    };
     let (lo, hi) = key_range(req.prefix, req.start, req.end, req.after)?;
     node.metrics().record_consistency(mode, false);
     let (page, partial) = if node.is_replicated() {
@@ -996,7 +1012,8 @@ async fn query(
                 .map_err(|e| ApiError::internal(format!("stored value is not JSON: {e}")))?;
             Ok(QueryItem {
                 key: String::from_utf8_lossy(&r.key).into_owned(),
-                value: match &fields {
+                // Aggregates read whole values; projection applies to items.
+                value: match fields.as_ref().filter(|_| aggregates.is_none()) {
                     Some(f) => crate::query::project(&value, f),
                     None => value,
                 },
@@ -1005,8 +1022,18 @@ async fn query(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
+    let (items, aggregates) = match aggregates.as_mut() {
+        Some(agg) => {
+            for item in &items {
+                agg.add(&item.value);
+            }
+            (Vec::new(), Some(agg.to_json()))
+        }
+        None => (items, None),
+    };
     let mut resp = Json(QueryResponse {
         items,
+        aggregates,
         next_cursor: page
             .resume
             .map(|k| String::from_utf8_lossy(&k).into_owned()),

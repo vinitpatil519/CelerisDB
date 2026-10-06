@@ -163,6 +163,18 @@ enum Command {
         /// Follow cursors until the whole range is read.
         #[arg(long)]
         all: bool,
+        /// Count the matches instead of listing them.
+        #[arg(long)]
+        count: bool,
+        /// Sum this numeric field over the matches (repeatable).
+        #[arg(long)]
+        sum: Vec<String>,
+        /// Smallest value of this field over the matches (repeatable).
+        #[arg(long)]
+        min: Vec<String>,
+        /// Largest value of this field over the matches (repeatable).
+        #[arg(long)]
+        max: Vec<String>,
         /// strict | session | bounded | available | eventual
         #[arg(long, short)]
         consistency: Option<String>,
@@ -444,8 +456,17 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             after,
             all,
             consistency,
+            count,
+            sum,
+            min,
+            max,
         } => {
             let mut body = serde_json::json!({ "limit": limit });
+            if count || !sum.is_empty() || !min.is_empty() || !max.is_empty() {
+                body["aggregate"] = serde_json::json!({
+                    "count": count, "sum": sum, "min": min, "max": max,
+                });
+            }
             if let Some(p) = prefix {
                 body["prefix"] = p.into();
             }
@@ -939,6 +960,7 @@ fn query(
 ) -> anyhow::Result<ExitCode> {
     let (mut matched, mut scanned) = (0u64, 0u64);
     let mut index: Option<String> = None;
+    let mut totals: Option<Value> = None;
     loop {
         if let Some(a) = &after {
             body["after"] = a.clone().into();
@@ -957,6 +979,12 @@ fn query(
             }
         }
         scanned += reply.body["scanned"].as_u64().unwrap_or(0);
+        if let Some(page) = reply.body.get("aggregates") {
+            match &mut totals {
+                Some(t) => merge_aggregates(t, page),
+                None => totals = Some(page.clone()),
+            }
+        }
         if let Some(name) = reply.body["index"].as_str() {
             index = Some(name.to_owned());
         }
@@ -964,6 +992,10 @@ fn query(
         match &after {
             Some(cursor) if !all => {
                 if !json {
+                    if let Some(t) = &totals {
+                        println!("{}", serde_json::to_string_pretty(t)?);
+                        eprintln!("-- partial: the range is not done; use --all for totals");
+                    }
                     eprintln!("-- more: add --after {cursor} (or use --all)");
                 }
                 return Ok(ExitCode::SUCCESS);
@@ -974,9 +1006,58 @@ fn query(
     }
     if !json {
         let via = index.map(|i| format!(" via index {i}")).unwrap_or_default();
-        eprintln!("-- {matched} matched, {scanned} scanned{via}");
+        match &totals {
+            Some(t) => {
+                println!("{}", serde_json::to_string_pretty(t)?);
+                eprintln!("-- {scanned} scanned{via}");
+            }
+            None => eprintln!("-- {matched} matched, {scanned} scanned{via}"),
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Folds one page's aggregates into the running totals: counts and sums
+/// add; min and max keep the extreme (numbers order before strings).
+fn merge_aggregates(total: &mut Value, page: &Value) {
+    use std::cmp::Ordering;
+    let rank = |a: &Value, b: &Value| match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .partial_cmp(&y.as_f64())
+            .unwrap_or(Ordering::Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Number(_), _) => Ordering::Less,
+        _ => Ordering::Greater,
+    };
+    if let (Some(a), Some(b)) = (total["count"].as_u64(), page["count"].as_u64()) {
+        total["count"] = (a + b).into();
+    }
+    if let Some(sums) = page["sum"].as_object() {
+        for (field, v) in sums {
+            let t = &total["sum"][field];
+            total["sum"][field] = match (t.as_i64(), v.as_i64()) {
+                (Some(a), Some(b)) => a
+                    .checked_add(b)
+                    .map_or_else(|| Value::from(a as f64 + b as f64), Value::from),
+                _ => match (t.as_f64(), v.as_f64()) {
+                    (Some(a), Some(b)) => Value::from(a + b),
+                    (None, _) => v.clone(),
+                    (Some(_), None) => t.clone(),
+                },
+            };
+        }
+    }
+    for (key, keep) in [("min", Ordering::Less), ("max", Ordering::Greater)] {
+        if let Some(values) = page[key].as_object() {
+            for (field, v) in values {
+                let t = &total[key][field];
+                if !v.is_null() && (t.is_null() || rank(v, t) == keep) {
+                    total[key][field] = v.clone();
+                }
+            }
+        }
+    }
 }
 
 fn report_write(result: WriteResult, json: bool) -> ExitCode {

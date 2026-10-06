@@ -288,6 +288,31 @@ Response:
   whole filter against each record. `index` in the response names the index
   used, or is `null` for a scan. Results are the same either way.
 
+#### Aggregates
+
+Add `aggregate` to count the matches and take the sum, minimum and maximum
+of fields instead of returning items (D-032):
+
+```json
+{"prefix":"orders/","where":{"status":"paid"},
+ "aggregate":{"count":true,"sum":["total"],"min":["created"],"max":["total"]}}
+```
+
+```json
+{"items":[],"aggregates":{"count":412,"sum":{"total":18230.5},"min":{"created":"2026-01-02"},"max":{"total":990}},
+ "next_cursor":"orders/0811","scanned":10000,"index":"orders_by_status","consistency":"strict","partial":false}
+```
+
+* Each response covers one page of at most `max_scanned` rows. While
+  `next_cursor` is set, keep paging and merge: add counts and sums, and keep
+  the smallest minimum and largest maximum. The SDKs' `aggregate` helpers
+  and `celeris query --all` do this for you.
+* `sum` adds numbers (exactly while every value is an integer). `min` and
+  `max` compare numbers by value and strings by code point; numbers order
+  before strings, and other types are skipped. A field with no usable values
+  is `null`.
+* `limit` and `fields` do not apply to aggregate requests.
+
 #### Secondary indexes
 
 Declare indexes in `celeris.toml`; every node of a cluster should list the
