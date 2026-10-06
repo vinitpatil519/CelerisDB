@@ -30,7 +30,7 @@ TypeScript (plus a React hook), Python, Rust and Go. See
 | 7. SDKs (TypeScript + React, Python, Rust, Go) and WebSocket change streams | done |
 | 8. Docker, compose, Kubernetes, AWS guide, admin console, website, release binaries | done ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) |
 | 9. Hardening: auth, TLS and cluster mTLS, backup/restore, benchmarks, chaos suite | done |
-| 10. Queries: JSON filters pushed down to replica sets, secondary indexes | in progress |
+| 10. Queries: JSON filters, secondary indexes, sorting and aggregates, pushed down to replica sets | done |
 
 ## Quick start
 

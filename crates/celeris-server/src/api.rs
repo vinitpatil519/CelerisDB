@@ -899,6 +899,7 @@ struct QueryRequest {
     filter: Option<Value>,
     fields: Option<Vec<String>>,
     aggregate: Option<Value>,
+    sort: Option<Value>,
     limit: Option<usize>,
     max_scanned: Option<usize>,
     consistency: Option<String>,
@@ -976,8 +977,28 @@ async fn query(
     } else {
         limit
     };
-    let (lo, hi) = key_range(req.prefix, req.start, req.end, req.after)?;
+    let sort = req
+        .sort
+        .as_ref()
+        .map(crate::query::Sort::parse)
+        .transpose()
+        .map_err(|e| ApiError::bad_request("invalid_argument", e))?;
+    // A sorted query's cursor is an index position (hex), not a key.
+    let (after_key, after_position) = match (&sort, req.after) {
+        (Some(_), Some(cursor)) => (
+            None,
+            Some(crate::query::unhex(&cursor).ok_or_else(|| {
+                ApiError::bad_request(
+                    "invalid_argument",
+                    "after is not a cursor of this sorted query",
+                )
+            })?),
+        ),
+        (_, after) => (after, None),
+    };
+    let (lo, hi) = key_range(req.prefix, req.start, req.end, after_key)?;
     node.metrics().record_consistency(mode, false);
+    let sorted = sort.is_some();
     let (page, partial) = if node.is_replicated() {
         let range = replicated::QueryRange {
             lo: replicated::WireBound::from_bound(&lo),
@@ -985,18 +1006,37 @@ async fn query(
             filter: req.filter,
             limit,
             max_scanned,
+            sort: req.sort,
+            after_position: after_position.as_deref().map(crate::query::hex),
         };
         replicated::query(&node, range, mode).await?
     } else {
         let page = node
-            .blocking(move |e| {
-                crate::query::filtered_scan(e, lo, hi, filter.as_ref(), limit, max_scanned, |_| {
-                    true
-                })
+            .blocking(move |e| match &sort {
+                Some(sort) => crate::query::sorted_scan(
+                    e,
+                    sort,
+                    (lo, hi),
+                    after_position,
+                    filter.as_ref(),
+                    (limit, max_scanned),
+                    |_| true,
+                ),
+                None => crate::query::filtered_scan(
+                    e,
+                    lo,
+                    hi,
+                    filter.as_ref(),
+                    limit,
+                    max_scanned,
+                    |_| true,
+                )
+                .map(Ok),
             })
             .await
             .map_err(|e| ApiError::internal(format!("query task failed: {e}")))?
-            .map_err(|e| ApiError::storage(e, None))?;
+            .map_err(|e| ApiError::storage(e, None))?
+            .map_err(|e| ApiError::bad_request("sort_unavailable", e))?;
         let partial = node
             .partitions()
             .nodes()
@@ -1034,9 +1074,13 @@ async fn query(
     let mut resp = Json(QueryResponse {
         items,
         aggregates,
-        next_cursor: page
-            .resume
-            .map(|k| String::from_utf8_lossy(&k).into_owned()),
+        next_cursor: page.resume.map(|k| {
+            if sorted {
+                crate::query::hex(&k)
+            } else {
+                String::from_utf8_lossy(&k).into_owned()
+            }
+        }),
         scanned: page.scanned,
         index: page.index,
         consistency: mode.as_str(),

@@ -496,6 +496,12 @@ pub(crate) struct QueryRange {
     pub filter: Option<serde_json::Value>,
     pub limit: usize,
     pub max_scanned: usize,
+    /// Sorted queries (D-035): the `sort` document, and the hex index
+    /// position to continue after.
+    #[serde(default)]
+    pub sort: Option<serde_json::Value>,
+    #[serde(default)]
+    pub after_position: Option<String>,
 }
 
 /// One group's answer to a query.
@@ -506,6 +512,12 @@ pub(crate) struct WireQueryPart {
     pub scanned: usize,
     #[serde(default)]
     pub index: Option<String>,
+    /// Sorted queries: hex index positions parallel to `records`; `resume`
+    /// is then a hex position too.
+    #[serde(default)]
+    pub sorted: bool,
+    #[serde(default)]
+    pub positions: Vec<String>,
 }
 
 impl WireQueryPart {
@@ -516,9 +528,18 @@ impl WireQueryPart {
                 .into_iter()
                 .map(WireRecord::into_record)
                 .collect(),
-            resume: self.resume.map(String::into_bytes),
+            resume: if self.sorted {
+                self.resume.as_deref().and_then(crate::query::unhex)
+            } else {
+                self.resume.map(String::into_bytes)
+            },
             scanned: self.scanned,
             index: self.index,
+            positions: self
+                .positions
+                .iter()
+                .filter_map(|p| crate::query::unhex(p))
+                .collect(),
         }
     }
 }
@@ -544,12 +565,64 @@ pub(crate) async fn local_group_query(
     let engine = group.engine();
     let (lo, hi) = (range.lo.to_bound(), range.hi.to_bound());
     let (limit, max_scanned) = (range.limit, range.max_scanned);
+    let sort = range
+        .sort
+        .as_ref()
+        .map(crate::query::Sort::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid sort: {e}"))?;
+    let after = match &range.after_position {
+        Some(p) => {
+            Some(crate::query::unhex(p).ok_or_else(|| anyhow::anyhow!("invalid sort cursor"))?)
+        }
+        None => None,
+    };
+    let sorted = sort.is_some();
     let part = tokio::task::spawn_blocking(move || {
-        crate::query::filtered_scan(&engine, lo, hi, filter.as_ref(), limit, max_scanned, |r| {
-            served.contains(&celeris_core::partition::partition_for(&r.key).get())
-        })
+        let accept =
+            |r: &Record| served.contains(&celeris_core::partition::partition_for(&r.key).get());
+        match &sort {
+            Some(sort) => crate::query::sorted_scan(
+                &engine,
+                sort,
+                (lo, hi),
+                after,
+                filter.as_ref(),
+                (limit, max_scanned),
+                accept,
+            )
+            .map(|r| r.map_err(anyhow::Error::msg)),
+            None => crate::query::filtered_scan(
+                &engine,
+                lo,
+                hi,
+                filter.as_ref(),
+                limit,
+                max_scanned,
+                accept,
+            )
+            .map(Ok),
+        }
     })
-    .await??;
+    .await???;
+    if sorted {
+        return Ok(WireQueryPart {
+            records: part
+                .records
+                .into_iter()
+                .map(WireRecord::from_record)
+                .collect(),
+            resume: part.resume.as_deref().map(crate::query::hex),
+            scanned: part.scanned,
+            index: part.index,
+            sorted: true,
+            positions: part
+                .positions
+                .iter()
+                .map(|p| crate::query::hex(p))
+                .collect(),
+        });
+    }
     Ok(WireQueryPart {
         records: part
             .records
@@ -561,6 +634,8 @@ pub(crate) async fn local_group_query(
             .map(|k| String::from_utf8_lossy(&k).into_owned()),
         scanned: part.scanned,
         index: part.index,
+        sorted: false,
+        positions: Vec::new(),
     })
 }
 

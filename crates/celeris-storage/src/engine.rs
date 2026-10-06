@@ -34,7 +34,7 @@ use crate::entry::{Entry, EntryKind};
 use crate::error::{Result, StorageError, corruption, io_err};
 use crate::fsutil::{self, DataFile};
 use crate::index::{
-    INDEX_META_PREFIX, IndexSpec, IndexState, IndexStatus, IndexStep, physical_prefix,
+    INDEX_META_PREFIX, IndexEntry, IndexSpec, IndexState, IndexStatus, IndexStep, physical_prefix,
 };
 use crate::iter::{EntryIter, MemIter, MergeIter, as_slice_bound, bounds_empty};
 use crate::manifest::{self, Manifest, TableMeta};
@@ -932,6 +932,102 @@ impl Engine {
                 if out.len() >= limit {
                     break;
                 }
+            }
+        }
+        Ok(Some(out))
+    }
+
+    /// Entries of index `name` in index order: ascending field value, or
+    /// descending for a descending index, then ascending key. Only values
+    /// within `lo..hi` (bounds on the field value; a single-sided bound stays
+    /// within the bound's type) are returned, starting after `after`, a
+    /// position from an earlier entry. `None` when the index is not ready
+    /// (or unknown), or a bound is not a scalar.
+    pub fn index_scan(
+        &self,
+        name: &str,
+        lo: Bound<&serde_json::Value>,
+        hi: Bound<&serde_json::Value>,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Option<Vec<IndexEntry>>> {
+        let Some(spec) = self.inner.opts.indexes.iter().find(|s| s.name == name) else {
+            return Ok(None);
+        };
+        let ready = matches!(
+            self.index_states()?.get(name),
+            Some(IndexState::Ready { fingerprint }) if *fingerprint == spec.fingerprint()
+        );
+        if !ready {
+            return Ok(None);
+        }
+        let encode = |b: Bound<&serde_json::Value>| -> Option<Bound<Vec<u8>>> {
+            Some(match b {
+                Bound::Included(v) => Bound::Included(spec.encode(v)?),
+                Bound::Excluded(v) => Bound::Excluded(spec.encode(v)?),
+                Bound::Unbounded => Bound::Unbounded,
+            })
+        };
+        let (Some(lo), Some(hi)) = (encode(lo), encode(hi)) else {
+            return Ok(None);
+        };
+        // In index order a descending index starts at the high value.
+        let (from, to) = if spec.descending { (hi, lo) } else { (lo, hi) };
+        let type_of = |b: &Bound<Vec<u8>>| match b {
+            Bound::Included(e) | Bound::Excluded(e) => e.first().copied(),
+            Bound::Unbounded => None,
+        };
+        let succ = |e: &[u8]| prefix_successor(e).unwrap_or_else(|| vec![0xFF; e.len() + 1]);
+        let mut start = match (&from, type_of(&to)) {
+            (Bound::Included(e), _) => Bound::Included(e.clone()),
+            (Bound::Excluded(e), _) => Bound::Included(succ(e)),
+            (Bound::Unbounded, Some(tag)) => Bound::Included(vec![tag]),
+            (Bound::Unbounded, None) => Bound::Unbounded,
+        };
+        let end = match (&to, type_of(&from)) {
+            (Bound::Included(e), _) => Bound::Excluded(succ(e)),
+            (Bound::Excluded(e), _) => Bound::Excluded(e.clone()),
+            (Bound::Unbounded, Some(tag)) => Bound::Excluded(vec![tag.wrapping_add(1)]),
+            (Bound::Unbounded, None) => Bound::Unbounded,
+        };
+        if let Some(after) = after {
+            let past = match &start {
+                Bound::Included(s) | Bound::Excluded(s) => after >= s.as_slice(),
+                Bound::Unbounded => true,
+            };
+            if past {
+                start = Bound::Excluded(after.to_vec());
+            }
+        }
+        let prefix = spec.physical_prefix();
+        let join = |e: Vec<u8>| [prefix.as_slice(), &e].concat();
+        let start = match start {
+            Bound::Included(e) => Bound::Included(join(e)),
+            Bound::Excluded(e) => Bound::Excluded(join(e)),
+            Bound::Unbounded => Bound::Included(prefix.clone()),
+        };
+        let end = match end {
+            Bound::Included(e) => Bound::Included(join(e)),
+            Bound::Excluded(e) => Bound::Excluded(join(e)),
+            Bound::Unbounded => prefix_successor(&prefix).map_or(Bound::Unbounded, Bound::Excluded),
+        };
+        let now = self.inner.clock.now_ms();
+        let mut out = Vec::new();
+        for e in self.inner.raw_entries(start, end) {
+            let e = e?;
+            if !e.is_live_at(now) {
+                continue;
+            }
+            let position = e.key[prefix.len()..].to_vec();
+            let Some((_, key)) = spec.split_suffix(&position) else {
+                continue;
+            };
+            out.push(IndexEntry {
+                key: key.to_vec(),
+                position,
+            });
+            if out.len() >= limit {
+                break;
             }
         }
         Ok(Some(out))

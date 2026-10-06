@@ -25,6 +25,7 @@ Global flags:
 | `celeris scan [--prefix p] [--after cursor] [--limit 100]` | List keys in order |
 | `celeris query [--prefix p] [--where JSON] [--fields a,b.c] [--limit N] [--max-scanned N] [--all]` | Keys whose JSON values match a filter, filtered on the nodes. `--all` follows cursors to the end of the range |
 | `celeris query ... [--count] [--sum f] [--min f] [--max f] --all` | Aggregate the matches instead of listing them; pages are merged |
+| `celeris query ... --sort total[:desc]` | Order by a field through an index declared on it with that order |
 | `celeris mutation <uuid>` | Did this mutation commit? |
 | `celeris conflicts list [--prefix p] [--limit N]` | Writes that lost last-writer-wins in `available` mode |
 | `celeris conflicts clear <key>` | Forget a key's recorded conflicts |

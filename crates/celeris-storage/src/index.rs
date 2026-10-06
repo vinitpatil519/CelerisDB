@@ -2,10 +2,12 @@
 //!
 //! An index maps one field of the JSON values under a key prefix to the
 //! keys holding them. Entries live in the reserved keyspace,
-//! `0x00 'x' <name> 0x00 <definition hash> 0x00 <encoded value> 0x00 <key>`,
-//! with empty values, so a prefix scan up to `<value> 0x00` yields the keys
-//! with that value in key order. The definition hash keeps the entries of
-//! a redefined index apart from the old ones being dropped.
+//! `0x00 'x' <name> 0x00 <definition hash> 0x00 <encoded value> <key>`, with
+//! empty values. The value encoding preserves order and is prefix-free, so
+//! entries sort by value, then key: a prefix scan over one value yields its
+//! keys in key order, and a range scan yields values in order (reversed for
+//! a descending index). The definition hash keeps the entries of a
+//! redefined index apart from the old ones being dropped.
 //!
 //! The engine maintains entries inside its write path, under the writer
 //! lock, from the previous value of each written key; every write path
@@ -31,6 +33,8 @@ pub struct IndexSpec {
     pub prefix: Vec<u8>,
     /// Dotted path of the field, split into segments.
     pub field: Vec<String>,
+    /// Entries sort by descending value (keys still ascend within a value).
+    pub descending: bool,
 }
 
 impl IndexSpec {
@@ -62,20 +66,63 @@ impl IndexSpec {
             name: name.to_owned(),
             prefix: prefix.as_bytes().to_vec(),
             field: field.split('.').map(str::to_owned).collect(),
+            descending: false,
         })
+    }
+
+    /// The same index, sorted by descending value.
+    pub fn descending(mut self) -> IndexSpec {
+        self.descending = true;
+        self
     }
 
     pub(crate) fn covers(&self, key: &[u8]) -> bool {
         key.first() != Some(&RESERVED_KEY_PREFIX) && key.starts_with(&self.prefix)
     }
 
-    /// Identifies the definition: a changed prefix or field is a new index.
+    /// Identifies the definition: a changed prefix, field, order or entry
+    /// encoding is a new index.
     pub(crate) fn fingerprint(&self) -> String {
         format!(
-            "{}\u{1}{}",
+            "v2\u{1}{}\u{1}{}\u{1}{}",
             String::from_utf8_lossy(&self.prefix),
-            self.field.join(".")
+            self.field.join("."),
+            if self.descending { "desc" } else { "asc" }
         )
+    }
+
+    /// The encoded form of a field value, in this index's order.
+    pub(crate) fn encode(&self, value: &Value) -> Option<Vec<u8>> {
+        let mut out = encode_ordered(value)?;
+        if self.descending {
+            for b in &mut out {
+                *b = !*b;
+            }
+        }
+        Some(out)
+    }
+
+    /// Splits an entry's suffix (after the physical prefix) into the
+    /// encoded value and the key.
+    pub(crate) fn split_suffix<'a>(&self, suffix: &'a [u8]) -> Option<(&'a [u8], &'a [u8])> {
+        let flip = |b: u8| if self.descending { !b } else { b };
+        let len = match flip(*suffix.first()?) {
+            TAG_NULL | TAG_FALSE | TAG_TRUE => 1,
+            TAG_NUMBER => 9,
+            TAG_STRING => {
+                let mut i = 1;
+                loop {
+                    match (flip(*suffix.get(i)?), suffix.get(i + 1).map(|b| flip(*b))) {
+                        (0, Some(1)) => break i + 2,
+                        (0, Some(0xFF)) => i += 2,
+                        (0, _) => return None,
+                        _ => i += 1,
+                    }
+                }
+            }
+            _ => return None,
+        };
+        (suffix.len() >= len).then(|| suffix.split_at(len))
     }
 
     /// The start of every entry of this definition.
@@ -87,8 +134,7 @@ impl IndexSpec {
     /// that are never indexed (arrays and objects).
     pub(crate) fn value_prefix(&self, value: &Value) -> Option<Vec<u8>> {
         let mut out = self.physical_prefix();
-        out.extend_from_slice(encode_scalar(value)?.as_bytes());
-        out.push(0);
+        out.extend_from_slice(&self.encode(value)?);
         Some(out)
     }
 
@@ -124,25 +170,47 @@ fn lookup<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     })
 }
 
-/// A canonical text form of a scalar, equal for values that compare equal:
-/// numbers by value (`1`, `1.0` and `1e0` encode the same), strings as JSON
-/// strings (which never contain a raw 0x00), `true`, `false`, `null`.
-pub(crate) fn encode_scalar(value: &Value) -> Option<String> {
+pub(crate) const TAG_NULL: u8 = 0x01;
+pub(crate) const TAG_FALSE: u8 = 0x02;
+pub(crate) const TAG_TRUE: u8 = 0x03;
+pub(crate) const TAG_NUMBER: u8 = 0x04;
+pub(crate) const TAG_STRING: u8 = 0x05;
+
+/// An order-preserving, prefix-free encoding of a scalar:
+/// `null < false < true < numbers < strings`. A number is its f64 value in
+/// 8 sortable bytes (`1` and `1.0` encode the same; integers beyond 2^53
+/// may share an encoding, which only widens a lookup, since results are
+/// re-checked). A string is its UTF-8 bytes with 0x00 escaped as `00 FF`,
+/// terminated by `00 01`.
+pub(crate) fn encode_ordered(value: &Value) -> Option<Vec<u8>> {
     match value {
-        Value::String(_) | Value::Bool(_) | Value::Null => serde_json::to_string(value).ok(),
+        Value::Null => Some(vec![TAG_NULL]),
+        Value::Bool(false) => Some(vec![TAG_FALSE]),
+        Value::Bool(true) => Some(vec![TAG_TRUE]),
         Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                return Some(i.to_string());
-            }
-            if let Some(u) = n.as_u64() {
-                return Some(u.to_string());
-            }
             let f = n.as_f64()?;
-            if f.fract() == 0.0 && f.abs() < 9.0e18 {
-                Some((f as i64).to_string())
+            let f = if f == 0.0 { 0.0 } else { f };
+            let bits = f.to_bits();
+            let sortable = if bits >> 63 == 1 {
+                !bits
             } else {
-                Some(format!("{f}"))
+                bits | (1 << 63)
+            };
+            let mut out = vec![TAG_NUMBER];
+            out.extend_from_slice(&sortable.to_be_bytes());
+            Some(out)
+        }
+        Value::String(s) => {
+            let mut out = Vec::with_capacity(s.len() + 3);
+            out.push(TAG_STRING);
+            for &b in s.as_bytes() {
+                out.push(b);
+                if b == 0 {
+                    out.push(0xFF);
+                }
             }
+            out.extend_from_slice(&[0, 1]);
+            Some(out)
         }
         Value::Array(_) | Value::Object(_) => None,
     }
@@ -238,6 +306,16 @@ pub struct IndexStatus {
     pub state: &'static str,
 }
 
+/// One entry of [`crate::Engine::index_scan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexEntry {
+    /// The indexed key.
+    pub key: Vec<u8>,
+    /// Where the entry sits in the index; pass it back as `after` to
+    /// continue a scan. Opaque.
+    pub position: Vec<u8>,
+}
+
 /// The result of one [`crate::Engine::index_step_at`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexStep {
@@ -260,11 +338,57 @@ mod tests {
             (json!(10000000000000000000u64), json!(1e19)),
             (json!(-3), json!(-3.0)),
         ] {
-            assert_eq!(encode_scalar(&a), encode_scalar(&b), "{a} {b}");
+            assert_eq!(encode_ordered(&a), encode_ordered(&b), "{a} {b}");
         }
-        assert_ne!(encode_scalar(&json!(1)), encode_scalar(&json!("1")));
-        assert_ne!(encode_scalar(&json!(1.5)), encode_scalar(&json!(1)));
-        assert_eq!(encode_scalar(&json!([1])), None);
+        assert_eq!(encode_ordered(&json!(0)), encode_ordered(&json!(-0.0)));
+        assert_ne!(encode_ordered(&json!(1)), encode_ordered(&json!("1")));
+        assert_ne!(encode_ordered(&json!(1.5)), encode_ordered(&json!(1)));
+        assert_eq!(encode_ordered(&json!([1])), None);
+    }
+
+    #[test]
+    fn encoding_preserves_order_and_splits_back() {
+        let ordered = [
+            json!(null),
+            json!(false),
+            json!(true),
+            json!(-1e300),
+            json!(-2),
+            json!(-0.5),
+            json!(0),
+            json!(0.25),
+            json!(3),
+            json!(1e300),
+            json!(""),
+            json!("a"),
+            json!("a\u{0}"),
+            json!("a\u{0}b"),
+            json!("ab"),
+            json!("b"),
+        ];
+        for spec in [
+            IndexSpec::new("i", "", "f").expect("spec"),
+            IndexSpec::new("i", "", "f").expect("spec").descending(),
+        ] {
+            let encoded: Vec<Vec<u8>> = ordered
+                .iter()
+                .map(|v| spec.encode(v).expect("scalar"))
+                .collect();
+            for pair in encoded.windows(2) {
+                if spec.descending {
+                    assert!(pair[0] > pair[1], "{pair:?}");
+                } else {
+                    assert!(pair[0] < pair[1], "{pair:?}");
+                }
+            }
+            for e in &encoded {
+                let suffix = [e.as_slice(), b"key/1"].concat();
+                assert_eq!(
+                    spec.split_suffix(&suffix),
+                    Some((e.as_slice(), &b"key/1"[..]))
+                );
+            }
+        }
     }
 
     #[test]

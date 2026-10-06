@@ -980,3 +980,117 @@ async fn aggregates_merge_across_pages() {
     .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn sorted_queries_walk_an_index_in_value_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec = |order_desc: bool| {
+        let s = celeris_storage::IndexSpec::new(
+            if order_desc {
+                "by_total_desc"
+            } else {
+                "by_total"
+            },
+            "orders/",
+            "total",
+        )
+        .expect("spec");
+        if order_desc { s.descending() } else { s }
+    };
+    let options = Options {
+        sync: SyncMode::Never,
+        background_work: false,
+        indexes: vec![spec(false), spec(true)],
+        ..Options::default()
+    };
+    let engine = Engine::open(dir.path(), options).expect("engine");
+    let node = Arc::new(Node::new(
+        engine,
+        NodeId::new("node-sort").expect("node id"),
+        "127.0.0.1:0".into(),
+        Vec::new(),
+    ));
+    node.blocking(|e| while e.index_step_at(0, 100).expect("step").worked {})
+        .await
+        .expect("steps");
+    let app = api::router(Arc::clone(&node));
+    let json_header = [("content-type", "application/json")];
+    let totals = [40, 10, 30, 10, 50, 20];
+    for (i, t) in totals.iter().enumerate() {
+        let doc = json!({"total": t, "paid": i % 2 == 0});
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/kv/orders/{i}"),
+            &json_header,
+            Some(&doc.to_string()),
+        )
+        .await;
+    }
+    call(
+        &app,
+        "PUT",
+        "/v1/kv/orders/x",
+        &json_header,
+        Some(r#"{"paid":true}"#),
+    )
+    .await;
+    let query = |body: Value| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/v1/query",
+                &[("content-type", "application/json")],
+                Some(&body.to_string()),
+            )
+            .await
+        }
+    };
+    let totals_of = |r: &Resp| -> Vec<i64> {
+        r.body["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|i| i["value"]["total"].as_i64().expect("total"))
+            .collect()
+    };
+
+    let r = query(json!({"prefix": "orders/", "sort": {"field": "total"}})).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(totals_of(&r), [10, 10, 20, 30, 40, 50]);
+    assert_eq!(r.body["index"], "by_total");
+
+    let r = query(json!({
+        "prefix": "orders/",
+        "where": {"total": {"$gte": 20, "$lt": 50}},
+        "sort": {"field": "total", "order": "desc"},
+    }))
+    .await;
+    assert_eq!(totals_of(&r), [40, 30, 20]);
+    assert_eq!(r.body["scanned"], 3, "the bounds narrow the index walk");
+
+    // Paging with tiny budgets keeps the order and loses nothing.
+    let mut seen = Vec::new();
+    let mut after = Value::Null;
+    loop {
+        let r = query(json!({
+            "prefix": "orders/", "where": {"paid": true},
+            "sort": {"field": "total", "order": "desc"},
+            "limit": 1, "max_scanned": 2, "after": after,
+        }))
+        .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        seen.extend(totals_of(&r));
+        if r.body["next_cursor"].is_null() {
+            break;
+        }
+        after = r.body["next_cursor"].clone();
+    }
+    assert_eq!(seen, [50, 40, 30]);
+
+    let r = query(json!({"prefix": "orders/", "sort": {"field": "paid"}})).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    assert_eq!(r.body["error"]["code"], "sort_unavailable");
+}

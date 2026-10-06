@@ -437,6 +437,167 @@ pub struct FilteredScan {
     pub scanned: usize,
     /// The secondary index that served the query, if any.
     pub index: Option<String>,
+    /// Sorted queries: each record's index position, parallel to
+    /// `records`; `resume` is then a position too. Empty otherwise.
+    pub positions: Vec<Vec<u8>>,
+}
+
+/// `sort` of a query: order the matches by one field, through an index
+/// declared on that field with the same order (D-035).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sort {
+    pub field: Vec<String>,
+    pub descending: bool,
+}
+
+impl Sort {
+    /// Parses `{"field": "total", "order": "asc" | "desc"}`.
+    pub fn parse(doc: &Value) -> Result<Sort, String> {
+        let field = doc["field"]
+            .as_str()
+            .ok_or_else(|| "sort.field must be a field path".to_owned())?;
+        let descending = match doc.get("order").and_then(Value::as_str) {
+            None | Some("asc") => false,
+            Some("desc") => true,
+            Some(other) => return Err(format!("sort.order must be asc or desc, not {other}")),
+        };
+        if let Some(extra) = doc
+            .as_object()
+            .and_then(|m| m.keys().find(|k| *k != "field" && *k != "order"))
+        {
+            return Err(format!("unknown sort option {extra}"));
+        }
+        Ok(Sort {
+            field: parse_path(field)?,
+            descending,
+        })
+    }
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn unhex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Bounds on the sort field from the filter's top-level conditions; the
+/// filter re-checks every record, so loose bounds are only slower.
+fn sort_bounds<'a>(
+    filter: Option<&'a Filter>,
+    field: &[String],
+) -> (Bound<&'a Value>, Bound<&'a Value>) {
+    let conditions: Vec<&Filter> = match filter {
+        Some(Filter::And(all)) => all.iter().collect(),
+        Some(other) => vec![other],
+        None => Vec::new(),
+    };
+    let (mut lo, mut hi) = (Bound::Unbounded, Bound::Unbounded);
+    for c in conditions {
+        let Filter::Field { path, op } = c else {
+            continue;
+        };
+        if path.as_slice() != field {
+            continue;
+        }
+        match op {
+            Op::Eq(v) if !v.is_array() && !v.is_object() => {
+                lo = Bound::Included(v);
+                hi = Bound::Included(v);
+            }
+            Op::Gt(v) => lo = Bound::Excluded(v),
+            Op::Gte(v) => lo = Bound::Included(v),
+            Op::Lt(v) => hi = Bound::Excluded(v),
+            Op::Lte(v) => hi = Bound::Included(v),
+            _ => {}
+        }
+    }
+    (lo, hi)
+}
+
+/// A query ordered by `sort`: walks a ready index declared on that field
+/// with the same order, in index order, re-reading and re-checking each
+/// record. Records whose field is missing or not a scalar are not in the
+/// index, so they are not returned. `Err` (a client message) when no such
+/// index covers the key range or it is still building.
+pub fn sorted_scan(
+    engine: &Engine,
+    sort: &Sort,
+    (lo, hi): (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    after: Option<Vec<u8>>,
+    filter: Option<&Filter>,
+    (limit, max_scanned): (usize, usize),
+    accept: impl Fn(&Record) -> bool,
+) -> celeris_storage::Result<Result<FilteredScan, String>> {
+    let Some(spec) = engine.index_specs().iter().find(|s| {
+        s.field == sort.field
+            && s.descending == sort.descending
+            && range_within(&lo, &hi, &s.prefix)
+    }) else {
+        return Ok(Err(format!(
+            "sorting by {} ({}) needs an index on that field with that order covering the key range",
+            sort.field.join("."),
+            if sort.descending { "desc" } else { "asc" }
+        )));
+    };
+    let in_range = |k: &[u8]| {
+        let above = match &lo {
+            Bound::Included(s) => k >= s.as_slice(),
+            Bound::Excluded(s) => k > s.as_slice(),
+            Bound::Unbounded => true,
+        };
+        let below = match &hi {
+            Bound::Included(e) => k <= e.as_slice(),
+            Bound::Excluded(e) => k < e.as_slice(),
+            Bound::Unbounded => true,
+        };
+        above && below
+    };
+    let (value_lo, value_hi) = sort_bounds(filter, &sort.field);
+    let mut out = FilteredScan {
+        index: Some(spec.name.clone()),
+        ..FilteredScan::default()
+    };
+    let mut cursor = after;
+    loop {
+        let want = SCAN_CHUNK.min(max_scanned - out.scanned).max(1);
+        let Some(entries) =
+            engine.index_scan(&spec.name, value_lo, value_hi, cursor.as_deref(), want)?
+        else {
+            return Ok(Err(format!("index {} is still building", spec.name)));
+        };
+        let exhausted = entries.len() < want;
+        let count = entries.len();
+        for (i, entry) in entries.into_iter().enumerate() {
+            out.scanned += 1;
+            if in_range(&entry.key)
+                && let Some(r) = engine.get(&entry.key)?
+                && accept(&r)
+                && filter.is_none_or(|f| {
+                    serde_json::from_slice::<Value>(&r.value).is_ok_and(|v| f.matches(&v))
+                })
+            {
+                out.records.push(r);
+                out.positions.push(entry.position.clone());
+            }
+            if out.records.len() >= limit || out.scanned >= max_scanned {
+                let done = exhausted && i + 1 == count;
+                out.resume = (!done).then_some(entry.position);
+                return Ok(Ok(out));
+            }
+            cursor = Some(entry.position);
+        }
+        if exhausted {
+            return Ok(Ok(out));
+        }
+    }
 }
 
 /// Up to `limit` records with keys in `(lo, hi)` that pass `accept` and the
@@ -617,23 +778,36 @@ pub fn merge_parts(parts: Vec<FilteredScan>, limit: usize) -> FilteredScan {
     let cutoff = parts.iter().filter_map(|p| p.resume.clone()).min();
     let scanned = parts.iter().map(|p| p.scanned).sum();
     let index = parts.iter().find_map(|p| p.index.clone());
-    let mut records: Vec<Record> = parts
+    let sorted = parts.iter().any(|p| !p.positions.is_empty());
+    // Each record with its place in the merged order: its index position
+    // for sorted queries, its key otherwise.
+    let mut rows: Vec<(Vec<u8>, Record)> = parts
         .into_iter()
-        .flat_map(|p| p.records)
-        .filter(|r| cutoff.as_ref().is_none_or(|c| r.key <= *c))
+        .flat_map(|p| {
+            let positions = if p.positions.len() == p.records.len() {
+                p.positions.into_iter().map(Some).collect()
+            } else {
+                vec![None; p.records.len()]
+            };
+            positions.into_iter().zip(p.records)
+        })
+        .map(|(position, r)| (position.unwrap_or_else(|| r.key.clone()), r))
+        .filter(|(place, _)| cutoff.as_ref().is_none_or(|c| place <= c))
         .collect();
-    records.sort_by(|a, b| a.key.cmp(&b.key));
-    let resume = if records.len() > limit {
-        records.truncate(limit);
-        records.last().map(|r| r.key.clone())
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let resume = if rows.len() > limit {
+        rows.truncate(limit);
+        rows.last().map(|(place, _)| place.clone())
     } else {
         cutoff
     };
+    let (positions, records): (Vec<Vec<u8>>, Vec<Record>) = rows.into_iter().unzip();
     FilteredScan {
         records,
         resume,
         scanned,
         index,
+        positions: if sorted { positions } else { Vec::new() },
     }
 }
 
@@ -773,12 +947,14 @@ mod tests {
             resume: Some(b"k5".to_vec()),
             scanned: 10,
             index: None,
+            positions: Vec::new(),
         };
         let b = FilteredScan {
             records: vec![rec("k2"), rec("k7")],
             resume: None,
             scanned: 3,
             index: None,
+            positions: Vec::new(),
         };
         let page = merge_parts(vec![a, b], 10);
         let keys: Vec<_> = page.records.iter().map(|r| r.key.clone()).collect();
@@ -793,12 +969,14 @@ mod tests {
                     resume: None,
                     scanned: 2,
                     index: None,
+                    positions: Vec::new(),
                 },
                 FilteredScan {
                     records: vec![rec("b"), rec("d")],
                     resume: None,
                     scanned: 2,
                     index: None,
+                    positions: Vec::new(),
                 },
             ],
             3,

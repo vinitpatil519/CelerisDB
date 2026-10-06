@@ -225,6 +225,31 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-035 Sorting through ordered indexes
+
+* **An order-preserving index encoding.** Index entries now encode the
+  value with a type tag, then 8 sortable bytes for numbers (f64) or
+  escaped, terminated bytes for strings. The encoding is prefix-free, so
+  entries sort by value and then key, and a range of values is a range of
+  keys. The definition version moved to v2, so existing indexes rebuild
+  themselves through the usual index steps (D-031).
+* **Descending through complement, not reverse scans.** The engine
+  iterates forwards only. A descending index stores the bitwise
+  complement of the encoding, which reverses the value order while keys
+  still ascend within a value. A sort needs an index declared with the
+  same order.
+* **Bounded, gap-free pages as before.** A sorted query walks the index
+  from the cursor, re-reads and re-checks each record, and stops at
+  `limit` or `max_scanned`. The cursor is the index position. Cluster
+  groups return positions with their records, and the coordinator merges
+  them by position with the same cutoff rule as D-030.
+* **Range conditions narrow the walk.** Top-level `$gt/$gte/$lt/$lte/$eq`
+  on the sort field become index bounds. A one-sided bound is limited to
+  its type, so `{"$gte": 100}` does not walk every string.
+* **Limits.** Integers beyond 2^53 share f64 encodings, so their relative
+  order can be off by ties (filters still compare exactly). Records
+  without a scalar value for the field are not returned by sorted queries.
+
 ## D-034 Chaos testing with in-process fault injection
 
 * **Partitions without root.** `Node::isolate_from(peers)` (a test hook)

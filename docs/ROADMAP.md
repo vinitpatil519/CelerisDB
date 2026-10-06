@@ -270,7 +270,7 @@ Not done: resumable change streams (from a log position).
   under a compare-and-set workload (`tests/chaos.rs`); counters must match
   acknowledged increments exactly and replicas must converge.
 
-## M10 — Queries
+## M10 — Queries: done
 
 * [x] Filtered queries (D-030): `POST /v1/query` with MongoDB-style JSON
   filters and projection, pushed down to every replica set, bounded by
@@ -280,4 +280,5 @@ Not done: resumable change streams (from a log position).
   and dropped in replicated steps, used by equality filters.
 * [x] Aggregates (D-032): count, sum, min and max per page, merged by the
   CLI (`--count --sum --min --max --all`) and the SDKs' `aggregate` helpers.
-* [ ] Sorting by a field (needs range indexes).
+* [x] Sorting by a field (D-035): ordered (asc/desc) indexes, range
+  conditions as index bounds, gap-free sorted paging across replica sets.

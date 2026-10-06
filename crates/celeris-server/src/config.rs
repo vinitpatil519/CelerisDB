@@ -38,12 +38,27 @@ pub struct IndexConfig {
     #[serde(default)]
     pub prefix: String,
     pub field: String,
+    /// `asc` (default) or `desc`: the order sorted queries read values in.
+    #[serde(default)]
+    pub order: IndexOrder,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexOrder {
+    #[default]
+    Asc,
+    Desc,
 }
 
 impl IndexConfig {
     pub fn spec(&self) -> anyhow::Result<celeris_storage::IndexSpec> {
-        celeris_storage::IndexSpec::new(&self.name, &self.prefix, &self.field)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        let spec = celeris_storage::IndexSpec::new(&self.name, &self.prefix, &self.field)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(match self.order {
+            IndexOrder::Asc => spec,
+            IndexOrder::Desc => spec.descending(),
+        })
     }
 }
 
@@ -541,6 +556,7 @@ mutation_retention_secs = 86400
 # name = "orders_by_status"
 # prefix = "orders/"
 # field = "status"
+# order = "asc"    # or "desc": the order `sort` reads values in
 
 [log]
 level = "info"     # [CELERIS_LOG_LEVEL] (RUST_LOG also works)

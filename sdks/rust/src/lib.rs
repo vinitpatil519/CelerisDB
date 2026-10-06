@@ -298,6 +298,9 @@ pub struct QueryOptions {
     /// Aggregate the matches instead of returning them, e.g.
     /// `json!({"count": true, "sum": ["total"], "max": ["created"]})`.
     pub aggregate: Option<serde_json::Value>,
+    /// Order by a field, e.g. `json!({"field": "total", "order": "desc"})`;
+    /// needs an index on that field with that order.
+    pub sort: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -731,6 +734,7 @@ impl Client {
         set("fields", options.fields.clone().map(Into::into));
         set("max_scanned", options.max_scanned.map(Into::into));
         set("aggregate", options.aggregate.clone());
+        set("sort", options.sort.clone());
         set("after", after.map(Into::into));
         let body = serde_json::to_vec(&body).map_err(|e| Error::Decode(e.to_string()))?;
         let raw = self

@@ -163,6 +163,9 @@ enum Command {
         /// Follow cursors until the whole range is read.
         #[arg(long)]
         all: bool,
+        /// Order by a field: `total` or `total:desc` (needs an index on it).
+        #[arg(long)]
+        sort: Option<String>,
         /// Count the matches instead of listing them.
         #[arg(long)]
         count: bool,
@@ -460,8 +463,13 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             sum,
             min,
             max,
+            sort,
         } => {
             let mut body = serde_json::json!({ "limit": limit });
+            if let Some(s) = sort {
+                let (field, order) = s.split_once(':').unwrap_or((s.as_str(), "asc"));
+                body["sort"] = serde_json::json!({ "field": field, "order": order });
+            }
             if count || !sum.is_empty() || !min.is_empty() || !max.is_empty() {
                 body["aggregate"] = serde_json::json!({
                     "count": count, "sum": sum, "min": min, "max": max,

@@ -194,6 +194,11 @@ type QueryOptions struct {
 	// Aggregate the matches instead of returning them, e.g.
 	// map[string]any{"count": true, "sum": []string{"total"}}.
 	Aggregate map[string]any
+	// SortField orders the matches by a field ("" keeps key order); it
+	// needs an index on that field with the same order.
+	SortField string
+	// SortDesc sorts by descending value.
+	SortDesc bool
 }
 
 // QueryPage is one page of a query. NextCursor is set while the range is
@@ -527,6 +532,13 @@ func (c *Client) QueryPage(ctx context.Context, opts *QueryOptions, after string
 	}
 	if opts.Aggregate != nil {
 		req["aggregate"] = opts.Aggregate
+	}
+	if opts.SortField != "" {
+		order := "asc"
+		if opts.SortDesc {
+			order = "desc"
+		}
+		req["sort"] = map[string]any{"field": opts.SortField, "order": order}
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

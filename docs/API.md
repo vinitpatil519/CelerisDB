@@ -288,6 +288,31 @@ Response:
   whole filter against each record. `index` in the response names the index
   used, or is `null` for a scan. Results are the same either way.
 
+#### Sorting
+
+`sort` orders the matches by one field instead of by key (D-035):
+
+```json
+{"prefix":"orders/","where":{"status":"paid","total":{"$gte":100}},
+ "sort":{"field":"total","order":"desc"},"limit":20}
+```
+
+* It needs a ready index on that field with the same order (`order =
+  "desc"` in the index definition for descending sorts) whose prefix
+  covers the query's range; otherwise the query fails with
+  `400 sort_unavailable`.
+* Matches come in value order, then key order for equal values. Records
+  whose field is missing, or is an array or object, are not in the index
+  and are not returned.
+* Conditions on the sort field at the top level of `where` (`$eq`, `$gt`,
+  `$gte`, `$lt`, `$lte`) narrow the part of the index read; the whole
+  filter is still checked on every record.
+* Values order as `null < false < true < numbers < strings`. A one-sided
+  bound such as `{"$gte": 100}` stays within its type.
+* `next_cursor` is an opaque index position. Pass it back as `after` with
+  the same `sort`. Paging works the same way as for unsorted queries, in a
+  cluster too.
+
 #### Aggregates
 
 Add `aggregate` to count the matches and take the sum, minimum and maximum
@@ -323,6 +348,7 @@ same ones (D-031):
 name = "orders_by_status"   # a-z, 0-9, _ and -
 prefix = "orders/"          # only keys under this prefix ("" for all keys)
 field = "status"            # dotted path into the JSON value
+order = "asc"               # or "desc": the order `sort` reads values in
 ```
 
 * An index covers string, number, boolean and null values of the field.

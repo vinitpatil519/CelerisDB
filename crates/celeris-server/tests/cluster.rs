@@ -1368,11 +1368,20 @@ async fn secondary_indexes_are_built_through_raft_and_serve_queries() {
     let voters = ["ia", "ib", "ic"];
     let config = |seed, id| {
         let mut config = test_config(seed, Some(id), &voters);
-        config.indexes = vec![celeris_server::config::IndexConfig {
-            name: "by_kind".into(),
-            prefix: "ix/".into(),
-            field: "kind".into(),
-        }];
+        config.indexes = vec![
+            celeris_server::config::IndexConfig {
+                name: "by_kind".into(),
+                prefix: "ix/".into(),
+                field: "kind".into(),
+                ..Default::default()
+            },
+            celeris_server::config::IndexConfig {
+                name: "by_n_desc".into(),
+                prefix: "ix/".into(),
+                field: "n".into(),
+                order: celeris_server::config::IndexOrder::Desc,
+            },
+        ];
         config
     };
     let a = start_with(config(None, "ia")).await;
@@ -1463,6 +1472,38 @@ async fn secondary_indexes_are_built_through_raft_and_serve_queries() {
         .map(|i| i["key"].as_str().expect("key"))
         .collect();
     assert_eq!(keys, ["ix/01", "ix/03"]);
+
+    // Sorted by n, descending, across every group, in small pages.
+    let mut ns = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut body = json!({
+            "prefix": "ix/", "sort": {"field": "n", "order": "desc"},
+            "limit": 4, "max_scanned": 3,
+        });
+        if let Some(a) = &after {
+            body["after"] = json!(a);
+        }
+        let (code, page, _) = request(
+            c.http,
+            "POST",
+            "/v1/query",
+            &[("content-type", "application/json")],
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(code, 200, "{page}");
+        for item in page["items"].as_array().expect("items") {
+            ns.push(item["value"]["n"].as_i64().expect("n"));
+        }
+        match page["next_cursor"].as_str() {
+            Some(cursor) => after = Some(cursor.to_owned()),
+            None => break,
+        }
+    }
+    // ix/00 and ix/01 were overwritten without n.
+    let expected: Vec<i64> = (2..30).rev().collect();
+    assert_eq!(ns, expected);
     for n in [a, b, c] {
         n.task.abort();
     }

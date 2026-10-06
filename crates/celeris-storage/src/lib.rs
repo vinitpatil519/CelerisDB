@@ -47,7 +47,7 @@ pub use engine::{
     WriteOutcome, prefix_successor,
 };
 pub use error::{Result, StorageError};
-pub use index::{IndexSpec, IndexStatus, IndexStep};
+pub use index::{IndexEntry, IndexSpec, IndexStatus, IndexStep};
 pub use manifest::MANIFEST_FORMAT_VERSION;
 pub use metrics::MetricsSnapshot;
 pub use sstable::TABLE_FORMAT_VERSION;

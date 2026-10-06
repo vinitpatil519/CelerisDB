@@ -263,3 +263,96 @@ fn concurrent_group_commit_writers_keep_the_index_exact() {
         assert_eq!(lookup(&e, v.clone()), Some(brute(&e, &v)), "{v}");
     }
 }
+
+#[test]
+fn ordered_scans_follow_value_order_with_bounds_and_cursors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let asc = IndexSpec::new("by_total", "orders/", "total").expect("spec");
+    let desc = IndexSpec::new("by_total_desc", "orders/", "total")
+        .expect("spec")
+        .descending();
+    let e = open(dir.path(), vec![asc, desc]);
+    finish_steps(&e, 100);
+    let totals = [5, -3, 12, 5, 0, 99, 7, 12];
+    for (i, t) in totals.iter().enumerate() {
+        put(&e, &format!("orders/{i}"), json!({"total": t}));
+    }
+    put(&e, "orders/s", json!({"total": "n/a"}));
+    let scan = |name: &str, lo: Bound<&Value>, hi: Bound<&Value>, after: Option<&[u8]>, limit| {
+        e.index_scan(name, lo, hi, after, limit)
+            .expect("scan")
+            .expect("ready")
+    };
+    let keys = |entries: &[celeris_storage::IndexEntry]| -> Vec<String> {
+        entries
+            .iter()
+            .map(|x| String::from_utf8(x.key.clone()).expect("utf-8"))
+            .collect()
+    };
+
+    let all = scan("by_total", Bound::Unbounded, Bound::Unbounded, None, 100);
+    assert_eq!(
+        keys(&all),
+        [
+            "orders/1", "orders/4", "orders/0", "orders/3", "orders/6", "orders/2", "orders/7",
+            "orders/5", "orders/s"
+        ]
+    );
+    let all_desc = scan(
+        "by_total_desc",
+        Bound::Unbounded,
+        Bound::Unbounded,
+        None,
+        100,
+    );
+    assert_eq!(
+        keys(&all_desc),
+        [
+            "orders/s", "orders/5", "orders/2", "orders/7", "orders/6", "orders/0", "orders/3",
+            "orders/4", "orders/1"
+        ]
+    );
+
+    // A one-sided numeric bound stays within numbers.
+    let five = json!(5);
+    let at_least_5 = scan(
+        "by_total",
+        Bound::Included(&five),
+        Bound::Unbounded,
+        None,
+        100,
+    );
+    assert_eq!(
+        keys(&at_least_5),
+        [
+            "orders/0", "orders/3", "orders/6", "orders/2", "orders/7", "orders/5"
+        ]
+    );
+    let below_5_desc = scan(
+        "by_total_desc",
+        Bound::Unbounded,
+        Bound::Excluded(&five),
+        None,
+        100,
+    );
+    assert_eq!(keys(&below_5_desc), ["orders/4", "orders/1"]);
+
+    // Cursors continue where a page stopped.
+    let mut seen = Vec::new();
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        let page = scan(
+            "by_total_desc",
+            Bound::Unbounded,
+            Bound::Unbounded,
+            after.as_deref(),
+            2,
+        );
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|x| x.position.clone());
+        seen.extend(keys(&page));
+    }
+    assert_eq!(seen, keys(&all_desc));
+}

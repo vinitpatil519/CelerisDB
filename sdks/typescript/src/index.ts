@@ -112,6 +112,8 @@ export interface QueryOptions extends ScanOptions {
   maxScanned?: number;
   /** Aggregate the matches instead of returning them. */
   aggregate?: AggregateSpec;
+  /** Order by a field; needs an index on it with that order. */
+  sort?: { field: string; order?: "asc" | "desc" };
 }
 
 export interface AggregateSpec {
@@ -360,6 +362,7 @@ export class Client {
       where: options.where,
       fields: options.fields,
       aggregate: options.aggregate,
+      sort: options.sort,
       max_scanned: options.maxScanned,
       consistency: options.consistency ?? this.options.consistency,
       after,
