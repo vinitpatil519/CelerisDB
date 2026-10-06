@@ -90,10 +90,9 @@ export function revealIn(scope: Element) {
   });
   scope.querySelectorAll<HTMLElement>("[data-reveal='fade']").forEach((el) => {
     gsap.from(el, {
-      y: 28,
+      y: 20,
       opacity: 0,
-      filter: "blur(6px)",
-      duration: 1.1,
+      duration: 0.9,
       ease: "power3.out",
       delay: Number(el.dataset.delay ?? 0),
       scrollTrigger: { trigger: el, start: "top 88%", once: true },

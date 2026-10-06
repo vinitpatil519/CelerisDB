@@ -1,73 +1,58 @@
 import { useEffect, useRef } from "react";
 
-import { Nav, ScrollProgress } from "./components/ui";
-import { prefersReducedMotion, ScrollTrigger, startSmoothScroll } from "./motion";
-import { Developers } from "./sections/Developers";
-import { Hero } from "./sections/Hero";
-import { Journey } from "./sections/Journey";
-import { Modes } from "./sections/Modes";
-import { Proof } from "./sections/Proof";
-import { Resilience } from "./sections/Resilience";
-
-/** A soft light that trails the pointer across the page (fine pointers only). */
-function CursorGlow() {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!window.matchMedia("(pointer: fine)").matches || prefersReducedMotion()) return;
-    let x = innerWidth / 2;
-    let y = innerHeight / 2;
-    let tx = x;
-    let ty = y;
-    let raf = 0;
-    const onMove = (e: PointerEvent) => {
-      tx = e.clientX;
-      ty = e.clientY;
-    };
-    const loop = () => {
-      x += (tx - x) * 0.12;
-      y += (ty - y) * 0.12;
-      ref.current?.style.setProperty("transform", `translate3d(${x - 300}px, ${y - 300}px, 0)`);
-      raf = requestAnimationFrame(loop);
-    };
-    addEventListener("pointermove", onMove, { passive: true });
-    raf = requestAnimationFrame(loop);
-    return () => {
-      removeEventListener("pointermove", onMove);
-      cancelAnimationFrame(raf);
-    };
-  }, []);
-  return <div className="cursor-glow" ref={ref} aria-hidden="true" />;
-}
+import { Architecture } from "./blocks/Architecture";
+import { Band } from "./blocks/Band";
+import { Cap } from "./blocks/Cap";
+import { Cta, Proof } from "./blocks/Closing";
+import { Developers } from "./blocks/Developers";
+import { Features } from "./blocks/Features";
+import { Hero } from "./blocks/Hero";
+import { Integrations } from "./blocks/Integrations";
+import { Modes } from "./blocks/Modes";
+import { Partitions } from "./blocks/Partitions";
+import { Footer, Nav } from "./components/kit";
+import { revealIn, ScrollTrigger, startSmoothScroll, useGSAP } from "./motion";
 
 export function App() {
+  const main = useRef<HTMLElement>(null);
+
   useEffect(() => {
     const stop = startSmoothScroll();
     const refresh = () => ScrollTrigger.refresh();
     addEventListener("load", refresh);
     document.fonts?.ready.then(refresh);
+    // Late layout shifts (fonts, pin spacers) must not leave stale triggers.
+    const late = setTimeout(refresh, 800);
     return () => {
+      clearTimeout(late);
       removeEventListener("load", refresh);
       stop();
     };
   }, []);
+
+  // Scroll reveals for every [data-reveal] element on the page.
+  useGSAP(() => main.current && revealIn(main.current), { scope: main });
 
   return (
     <>
       <a className="skip" href="#start">
         Skip to install
       </a>
-      <div className="grain" aria-hidden="true" />
-      <CursorGlow />
-      <ScrollProgress />
       <Nav />
-      <main>
+      <main ref={main}>
         <Hero />
-        <Proof />
+        <Band />
+        <Cap />
         <Modes />
-        <Journey />
-        <Resilience />
+        <Architecture />
+        <Partitions />
+        <Features />
+        <Integrations />
         <Developers />
+        <Proof />
+        <Cta />
       </main>
+      <Footer />
     </>
   );
 }
