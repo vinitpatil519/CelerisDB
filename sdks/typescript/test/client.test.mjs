@@ -1,6 +1,7 @@
 // Integration tests: the compiled client (dist/) against a real node.
 
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 
 import { CelerisError, Client, OutcomeUnknownError, createKeyStore, encodeKey } from "../dist/index.js";
@@ -199,5 +200,35 @@ describe("failures", () => {
   test("status reports the node", async () => {
     const status = await client.status();
     assert.equal(typeof status, "object");
+  });
+});
+
+describe("authentication", () => {
+  const token = "cel_" + randomBytes(32).toString("hex");
+  const sha256 = createHash("sha256").update(token).digest("hex");
+  let secured;
+  before(async () => {
+    secured = await startNode({ CELERIS_AUTH_TOKENS: `sdk:read+write:${sha256}` });
+  });
+  after(async () => {
+    await secured?.stop();
+  });
+
+  test("requests without the token are refused", async () => {
+    const anonymous = new Client({ nodes: secured.url, attempts: 1 });
+    await assert.rejects(anonymous.get("a"), { status: 401, code: "unauthorized" });
+  });
+
+  test("the token authorizes requests and change streams", async () => {
+    const db = new Client({ nodes: secured.url, token });
+    await db.put("auth/a", 1);
+    assert.equal((await db.get("auth/a")).value, 1);
+    const events = [];
+    let hello = false;
+    const watcher = db.watch("auth/", { onHello: () => (hello = true), onChange: (e) => events.push(e) });
+    await eventually(() => hello);
+    await db.put("auth/b", 2);
+    await eventually(() => events.length === 1);
+    watcher.close();
   });
 });

@@ -402,7 +402,13 @@ impl ClientBuilder {
         self
     }
 
-    /// An extra header on every request (for example, an API token).
+    /// API token, sent as `Authorization: Bearer <token>`.
+    pub fn token(self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        self.header("authorization", format!("Bearer {token}"))
+    }
+
+    /// An extra header on every request.
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self

@@ -158,6 +158,7 @@ class Client:
         timeout: float = 10.0,
         attempts: int = 4,
         headers: Mapping[str, str] | None = None,
+        token: str | None = None,
     ):
         if isinstance(nodes, str):
             nodes = [nodes]
@@ -171,6 +172,8 @@ class Client:
         self._timeout = timeout
         self._attempts = attempts
         self._headers = dict(headers or {})
+        if token:
+            self._headers["authorization"] = f"Bearer {token}"
         self._preferred = 0
         self._session: str | None = None
 

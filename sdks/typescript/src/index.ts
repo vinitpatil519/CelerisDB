@@ -23,7 +23,10 @@ export interface ClientOptions {
   timeoutMs?: number;
   /** Attempts per request across nodes and transient errors. Default 4. */
   attempts?: number;
-  /** Extra headers on every request (for example, an API token). */
+  /** API token, sent as `Authorization: Bearer <token>` (and as
+   * `access_token` on change streams, where browsers cannot set headers). */
+  token?: string;
+  /** Extra headers on every request. */
   headers?: Record<string, string>;
   /** Custom fetch, for tests or special runtimes. */
   fetch?: typeof fetch;
@@ -336,7 +339,7 @@ export class Client {
    */
   watch<T = unknown>(prefix: string, handlers: WatchHandlers<T>): Watcher {
     const base = this.nodes[this.preferred]!.replace(/^http/, "ws");
-    const socket = new WebSocket(`${base}/v1/watch${query({ prefix })}`);
+    const socket = new WebSocket(`${base}/v1/watch${query({ prefix, access_token: this.options.token })}`);
     socket.onmessage = (msg: MessageEvent) => {
       let data: any;
       try {
@@ -379,7 +382,12 @@ export class Client {
     try {
       const init: RequestInit = {
         method,
-        headers: { "content-type": "application/json", ...this.options.headers, ...headers },
+        headers: {
+          "content-type": "application/json",
+          ...(this.options.token ? { authorization: `Bearer ${this.options.token}` } : {}),
+          ...this.options.headers,
+          ...headers,
+        },
         signal: controller.signal,
       };
       if (body !== undefined) init.body = body;

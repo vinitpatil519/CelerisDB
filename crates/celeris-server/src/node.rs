@@ -183,6 +183,7 @@ pub struct Node {
     advertise: String,
     started: Instant,
     cors_origins: Vec<String>,
+    auth: Arc<crate::auth::Authenticator>,
     metrics: HttpMetrics,
     shutdown: watch::Sender<bool>,
     /// Present when the node runs with a cluster port.
@@ -295,6 +296,9 @@ impl Node {
         node.membership = membership;
         node.control = control;
         node.anti_entropy_interval_ms = config.cluster.anti_entropy_interval_ms;
+        node.auth = Arc::new(
+            crate::auth::Authenticator::new(&config.auth.tokens).map_err(anyhow::Error::msg)?,
+        );
         // Apply the log known to be committed right away, so routing works
         // after a restart even before a leader is elected.
         if let Some(Err(e)) = node.with_raft(|_, _| ((), Vec::new())) {
@@ -775,6 +779,7 @@ impl Node {
             advertise,
             started: Instant::now(),
             cors_origins,
+            auth: Arc::new(crate::auth::Authenticator::default()),
             metrics: HttpMetrics::default(),
             shutdown: watch::channel(false).0,
             membership: None,
@@ -810,6 +815,16 @@ impl Node {
 
     pub fn uptime(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// The API token table (empty: authentication off).
+    pub fn auth(&self) -> &crate::auth::Authenticator {
+        &self.auth
+    }
+
+    /// Replaces the API token table (tests, embedding).
+    pub fn set_auth(&mut self, auth: crate::auth::Authenticator) {
+        self.auth = Arc::new(auth);
     }
 
     pub fn cors_origins(&self) -> &[String] {

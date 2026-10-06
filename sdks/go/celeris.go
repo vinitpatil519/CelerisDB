@@ -200,7 +200,9 @@ type Options struct {
 	Timeout time.Duration
 	// Attempts per request across nodes and transient errors. Default 4.
 	Attempts int
-	// Headers are added to every request (for example, an API token).
+	// Token is an API token, sent as "Authorization: Bearer <token>".
+	Token string
+	// Headers are added to every request.
 	Headers map[string]string
 	// HTTPClient overrides the HTTP client.
 	HTTPClient *http.Client
@@ -227,8 +229,14 @@ func New(opts Options) (*Client, error) {
 	c := &Client{
 		consistency: opts.Consistency,
 		attempts:    opts.Attempts,
-		headers:     opts.Headers,
+		headers:     map[string]string{},
 		http:        opts.HTTPClient,
+	}
+	for k, v := range opts.Headers {
+		c.headers[k] = v
+	}
+	if opts.Token != "" {
+		c.headers["Authorization"] = "Bearer " + opts.Token
 	}
 	for _, n := range opts.Nodes {
 		n = strings.TrimRight(n, "/")

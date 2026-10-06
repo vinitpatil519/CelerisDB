@@ -32,7 +32,7 @@ function freePort() {
 }
 
 /** Starts a node; resolves to `{ url, stop() }` once it answers /health. */
-export async function startNode() {
+export async function startNode(extraEnv = {}) {
   const bin = binary();
   const dir = mkdtempSync(join(tmpdir(), "celeris-ts-"));
   const port = await freePort();
@@ -40,7 +40,7 @@ export async function startNode() {
   const init = spawnSync(bin, ["init", "--dir", dir, "--listen", listen], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`celeris init failed: ${init.stderr}`);
   const child = spawn(bin, ["start", "--config", join(dir, "celeris.toml")], {
-    env: { ...process.env, CELERIS_SYNC: "never", CELERIS_LOG_LEVEL: "warn" },
+    env: { ...process.env, CELERIS_SYNC: "never", CELERIS_LOG_LEVEL: "warn", ...extraEnv },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";

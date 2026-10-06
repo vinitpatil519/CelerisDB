@@ -44,6 +44,9 @@ struct Cli {
     /// Print raw JSON responses.
     #[arg(long, global = true)]
     json: bool,
+    /// API token, sent as `Authorization: Bearer <token>`.
+    #[arg(long, global = true, env = "CELERIS_TOKEN", hide_env_values = true)]
+    token: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -155,6 +158,29 @@ enum Command {
     /// Measure latency and throughput against a running node.
     #[command(alias = "benchmark")]
     Bench(bench::Args),
+    /// Manage API tokens.
+    #[command(subcommand)]
+    Token(TokenCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum TokenCommand {
+    /// Generate a token and print the config entry that grants it.
+    Create {
+        /// A label for the token, e.g. `web-app`.
+        #[arg(long)]
+        name: String,
+        /// read, write or admin; repeat for several.
+        #[arg(long = "scope", required = true, value_parser = parse_scope)]
+        scopes: Vec<celeris_server::auth::Scope>,
+    },
+    /// Print the SHA-256 to store for an existing token (read from stdin).
+    Hash,
+}
+
+fn parse_scope(s: &str) -> Result<celeris_server::auth::Scope, String> {
+    celeris_server::auth::Scope::parse(s)
+        .ok_or_else(|| format!("unknown scope `{s}` (read, write, admin)"))
 }
 
 #[derive(Debug, Subcommand)]
@@ -201,6 +227,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    client::set_token(cli.token.clone());
     let client = Client::new(&cli.addr);
     let json = cli.json;
     match cli.command {
@@ -428,7 +455,62 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             ExitCode::FAILURE
         }),
         Command::Bench(args) => bench::run(&cli.addr, &args, json).map(|()| ExitCode::SUCCESS),
+        Command::Token(TokenCommand::Create { name, scopes }) => token_create(&name, &scopes),
+        Command::Token(TokenCommand::Hash) => {
+            let mut token = String::new();
+            std::io::stdin().read_line(&mut token)?;
+            println!("{}", celeris_server::auth::hash_token(token.trim()));
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+fn token_create(name: &str, scopes: &[celeris_server::auth::Scope]) -> anyhow::Result<ExitCode> {
+    use celeris_server::auth::{TokenConfig, generate_token, hash_token};
+    let token = generate_token();
+    let mut scopes = scopes.to_vec();
+    scopes.sort();
+    scopes.dedup();
+    let entry = TokenConfig {
+        name: name.to_owned(),
+        sha256: hash_token(&token),
+        scopes: scopes.clone(),
+    };
+    entry.validate().map_err(anyhow::Error::msg)?;
+    let list = |sep: &str| {
+        scopes
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(sep)
+    };
+    println!("token      {token}");
+    println!(
+        "           (shown once; give it to the client, e.g. CELERIS_TOKEN or the SDK `token` option)"
+    );
+    println!();
+    println!("Add to celeris.toml on every node:");
+    println!();
+    println!("[[auth.tokens]]");
+    println!("name = \"{name}\"");
+    println!("sha256 = \"{}\"", entry.sha256);
+    println!(
+        "scopes = [{}]",
+        scopes
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!();
+    println!("or as an environment variable:");
+    println!();
+    println!(
+        "CELERIS_AUTH_TOKENS=\"{name}:{}:{}\"",
+        list("+"),
+        entry.sha256
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn init(dir: &Path, listen: &str, force: bool) -> anyhow::Result<ExitCode> {

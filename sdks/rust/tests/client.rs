@@ -26,16 +26,23 @@ impl Drop for TestNode {
 }
 
 async fn start() -> TestNode {
+    start_with(|_| {}).await
+}
+
+async fn start_with(customize: impl FnOnce(&mut Node) + Send + 'static) -> TestNode {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config = Config::default();
     config.node.data_dir = dir.path().to_path_buf();
     config.storage.sync = SyncSetting::Never;
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("addr");
-    let node = tokio::task::spawn_blocking(move || Node::open(&config, addr.to_string(), None))
-        .await
-        .expect("join")
-        .expect("open");
+    let node = tokio::task::spawn_blocking(move || {
+        let mut node = Node::open(&config, addr.to_string(), None).expect("open");
+        customize(&mut node);
+        node
+    })
+    .await
+    .expect("join");
     let task = tokio::spawn(serve(
         Arc::new(node),
         listener,
@@ -305,4 +312,47 @@ async fn server_errors_carry_outcomes() {
         assert_ne!(*outcome, Some(Outcome::Unknown));
     }
     assert!(db.status().await.expect("status").is_object());
+}
+
+#[tokio::test]
+async fn tokens_authorize_requests_and_watches() {
+    use celeris_server::auth::{Authenticator, Scope, TokenConfig, generate_token, hash_token};
+    let token = generate_token();
+    let sha256 = hash_token(&token);
+    let node = start_with(move |n| {
+        n.set_auth(
+            Authenticator::new(&[TokenConfig {
+                name: "sdk".into(),
+                sha256,
+                scopes: vec![Scope::Read, Scope::Write],
+            }])
+            .expect("auth"),
+        );
+    })
+    .await;
+
+    let anonymous = Client::builder()
+        .node(&node.url)
+        .attempts(1)
+        .build()
+        .expect("client");
+    let err = anonymous.get::<Value>("a").await.expect_err("401");
+    assert_eq!((err.status(), err.code()), (Some(401), Some("unauthorized")));
+
+    let db = Client::builder()
+        .node(&node.url)
+        .token(token)
+        .build()
+        .expect("client");
+    db.put("auth/a", &1).await.expect("put");
+    let mut watch = db.watch("auth/").await.expect("watch");
+    db.put("auth/b", &2).await.expect("put");
+    match tokio::time::timeout(Duration::from_secs(5), watch.next())
+        .await
+        .expect("in time")
+        .expect("ok")
+    {
+        Some(WatchEvent::Change(e)) => assert_eq!(e.key, "auth/b"),
+        other => panic!("unexpected {other:?}"),
+    }
 }

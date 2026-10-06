@@ -2,6 +2,8 @@ import { Client } from "@celeris/client";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 
 const STORAGE_KEY = "celeris.console.nodes";
+/** Tokens live for the browser session only, never in localStorage. */
+const TOKEN_KEY = "celeris.console.token";
 const DEFAULT_NODES = "http://127.0.0.1:8080";
 
 function loadNodes(): string {
@@ -15,9 +17,22 @@ function loadNodes(): string {
 export interface Connection {
   /** Node base URLs, as typed by the user. */
   nodes: string[];
+  token: string;
   client: Client;
   setNodes(text: string): void;
+  setToken(token: string): void;
 }
+
+function loadToken(): string {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** The API token for `getJson` (set by the provider). */
+let currentToken = "";
 
 const ConnectionContext = createContext<Connection | null>(null);
 
@@ -31,12 +46,29 @@ export function parseNodes(text: string): string[] {
 
 export function ConnectionProvider({ children }: { children: ReactNode }) {
   const [text, setText] = useState(loadNodes);
+  const [token, setTokenState] = useState(loadToken);
   const value = useMemo<Connection>(() => {
     const nodes = parseNodes(text);
     const list = nodes.length > 0 ? nodes : [DEFAULT_NODES];
+    currentToken = token;
     return {
       nodes: list,
-      client: new Client({ nodes: list, timeoutMs: 5_000, attempts: Math.max(2, list.length) }),
+      token,
+      client: new Client({
+        nodes: list,
+        timeoutMs: 5_000,
+        attempts: Math.max(2, list.length),
+        ...(token ? { token } : {}),
+      }),
+      setToken(next: string) {
+        try {
+          if (next) sessionStorage.setItem(TOKEN_KEY, next);
+          else sessionStorage.removeItem(TOKEN_KEY);
+        } catch {
+          // storage unavailable: keep it in memory
+        }
+        setTokenState(next);
+      },
       setNodes(next: string) {
         try {
           localStorage.setItem(STORAGE_KEY, next);
@@ -46,7 +78,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
         setText(next);
       },
     };
-  }, [text]);
+  }, [text, token]);
   return <ConnectionContext.Provider value={value}>{children}</ConnectionContext.Provider>;
 }
 
@@ -61,7 +93,8 @@ export async function getJson<T = any>(node: string, path: string, timeoutMs = 4
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(node + path, { signal: controller.signal }).catch((e: unknown) => {
+    const headers: Record<string, string> = currentToken ? { authorization: `Bearer ${currentToken}` } : {};
+    const resp = await fetch(node + path, { signal: controller.signal, headers }).catch((e: unknown) => {
       if (controller.signal.aborted) throw new Error(`no answer within ${timeoutMs / 1000} s`);
       throw new Error(`cannot reach the node (${e instanceof Error ? e.message : String(e)}); check the URL and CORS`);
     });

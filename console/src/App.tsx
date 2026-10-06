@@ -59,14 +59,16 @@ export function App() {
 }
 
 function NodesForm() {
-  const { nodes, setNodes } = useConnection();
+  const { nodes, setNodes, token, setToken } = useConnection();
   const [text, setText] = useState(nodes.join("\n"));
+  const [secret, setSecret] = useState(token);
   return (
     <form
       className="nodes-form"
       onSubmit={(e) => {
         e.preventDefault();
         setNodes(text);
+        setToken(secret.trim());
       }}
     >
       <label htmlFor="nodes">Nodes</label>
@@ -77,6 +79,16 @@ function NodesForm() {
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder="http://127.0.0.1:8080"
+      />
+      <label htmlFor="token">API token</label>
+      <input
+        id="token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        value={secret}
+        onChange={(e) => setSecret(e.target.value)}
+        placeholder="only if the cluster requires one"
       />
       <button type="submit">Connect</button>
       <p className="hint">One API URL per line. Each node must allow this origin in http.cors_origins.</p>

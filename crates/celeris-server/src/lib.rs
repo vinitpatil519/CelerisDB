@@ -5,6 +5,7 @@
 
 mod anti_entropy;
 pub mod api;
+pub mod auth;
 mod available;
 mod cluster;
 pub mod config;

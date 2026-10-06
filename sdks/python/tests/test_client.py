@@ -155,3 +155,18 @@ def test_session_token_is_tracked(client):
 
 def test_status(client):
     assert isinstance(client.status(), dict)
+
+
+def test_token_is_required_and_accepted(secured_url):
+    from conftest import AUTH_TOKEN
+
+    with pytest.raises(CelerisError) as e:
+        Client(secured_url, attempts=1).get("a")
+    assert (e.value.status, e.value.code) == (401, "unauthorized")
+
+    db = Client(secured_url, token=AUTH_TOKEN)
+    db.put("auth/a", 1)
+    assert db.get("auth/a").value == 1
+    with db.watch("auth/") as watch:
+        db.put("auth/b", 2)
+        assert watch.next(timeout=5).key == "auth/b"

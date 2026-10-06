@@ -23,6 +23,15 @@ pub struct Config {
     pub cluster: ClusterConfig,
     pub storage: StorageConfig,
     pub log: LogConfig,
+    pub auth: AuthConfig,
+}
+
+/// API authentication. With no tokens, every request is allowed and admin
+/// endpoints accept loopback connections only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    pub tokens: Vec<crate::auth::TokenConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,11 +279,21 @@ impl Config {
                 other => bail!("CELERIS_LOG_FORMAT must be `pretty` or `json`, got `{other}`"),
             };
         }
+        if let Some(v) = get("CELERIS_AUTH_TOKENS") {
+            // Replaces the file's tokens, so a deployment can inject them.
+            self.auth.tokens = v
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .map(crate::auth::TokenConfig::parse_env)
+                .collect::<Result<_, _>>()
+                .map_err(anyhow::Error::msg)?;
+        }
         Ok(())
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
         self.listen_addr()?;
+        crate::auth::Authenticator::new(&self.auth.tokens).map_err(anyhow::Error::msg)?;
         for origin in &self.http.cors_origins {
             if origin != "*" && HeaderValue::from_str(origin).is_err() {
                 bail!("invalid CORS origin `{origin}`");
@@ -397,6 +416,17 @@ block_cache_mb = 64
 tombstone_retention_secs = 86400
 # How long mutation IDs are remembered, making client retries safe.
 mutation_retention_secs = 86400
+
+[auth]
+# Bearer tokens for the API. Without any, every request is allowed and
+# admin endpoints accept loopback connections only. Create one with
+# `celeris token create --name app --scope read --scope write`, which prints
+# the entry to paste here. Only the SHA-256 of each token is stored.
+# Scopes: read, write, admin. [CELERIS_AUTH_TOKENS="name:read+write:<sha256>,..."]
+# [[auth.tokens]]
+# name = "app"
+# sha256 = "<64 hex characters>"
+# scopes = ["read", "write"]
 
 [log]
 level = "info"     # [CELERIS_LOG_LEVEL] (RUST_LOG also works)

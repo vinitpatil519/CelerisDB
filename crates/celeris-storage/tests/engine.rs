@@ -914,7 +914,10 @@ fn group_commit_deduplicates_concurrent_retries() {
             })
         })
         .collect();
-    let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+    let outcomes: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("join"))
+        .collect();
     let first = outcomes[0].version;
     assert!(outcomes.iter().all(|o| o.version == first));
     assert_eq!(outcomes.iter().filter(|o| !o.deduplicated).count(), 1);

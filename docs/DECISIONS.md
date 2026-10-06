@@ -225,6 +225,21 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-027 API tokens with scopes
+
+* **Hashed at rest.** Nodes store the SHA-256 of each token, never the
+  token, and look requests up by hash.
+* **Three scopes.** `read`, `write` and `admin`, mapped from the matched
+  route and method by one middleware. Each scope is independent, so a
+  writer that also reads needs both.
+* **Public probes.** `/health`, `/ready` and `/metrics` stay open, because
+  load balancers and Prometheus need them and they carry no data.
+* **Admin.** Without tokens, admin endpoints keep the loopback-only rule.
+  With tokens, the `admin` scope replaces it, so operators can rebalance a
+  Kubernetes cluster without exec-ing into a pod.
+* **WebSockets.** `/v1/watch` also accepts `?access_token=`. It is the only
+  route that does, because tokens in URLs end up in logs.
+
 ## D-026 Group commit in the storage engine
 
 With `SyncMode::Always`, every batch paid its own fsync while holding the

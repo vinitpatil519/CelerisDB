@@ -7,6 +7,26 @@ unchanged.
 Browsers and SDKs only ever use this API. Internal cluster protocols are never
 exposed.
 
+## Authentication
+
+Authentication is off until at least one token is configured (`[[auth.tokens]]`
+or `CELERIS_AUTH_TOKENS`; create one with `celeris token create`). Then
+every request except `/health`, `/ready` and `/metrics` needs
+`Authorization: Bearer <token>`, with a scope that covers it:
+
+| Scope | Allows |
+|---|---|
+| `read` | `GET` key-value, scans, mutation status, conflicts, status, partitions, `/v1/watch` |
+| `write` | `PUT` / `DELETE` key-value, `POST /v1/batch`, `DELETE /v1/conflicts/{key}` |
+| `admin` | `/v1/admin/*`, from any address (without tokens, admin is loopback-only) |
+
+* A missing or unknown token gets `401 unauthorized` with
+  `WWW-Authenticate: Bearer`. A token without the scope gets `403 forbidden`.
+* Browsers cannot set headers on a WebSocket, so `/v1/watch` also accepts
+  `?access_token=<token>`.
+* Nodes store only the SHA-256 of each token.
+* The cluster port is not authenticated yet; keep it on a private network.
+
 ## Conventions
 
 | Header | Direction | Meaning |

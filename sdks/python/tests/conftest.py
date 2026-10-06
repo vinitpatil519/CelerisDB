@@ -39,11 +39,26 @@ def _free_port() -> int:
 
 @pytest.fixture(scope="session")
 def node_url():
+    yield from _node({})
+
+
+AUTH_TOKEN = "cel_" + "ab" * 32
+
+
+@pytest.fixture(scope="session")
+def secured_url():
+    import hashlib
+
+    sha = hashlib.sha256(AUTH_TOKEN.encode()).hexdigest()
+    yield from _node({"CELERIS_AUTH_TOKENS": f"sdk:read+write:{sha}"})
+
+
+def _node(extra_env):
     binary = _binary()
     data = tempfile.mkdtemp(prefix="celeris-py-")
     listen = f"127.0.0.1:{_free_port()}"
     subprocess.run([binary, "init", "--dir", data, "--listen", listen], check=True, capture_output=True)
-    env = {**os.environ, "CELERIS_SYNC": "never", "CELERIS_LOG_LEVEL": "warn"}
+    env = {**os.environ, "CELERIS_SYNC": "never", "CELERIS_LOG_LEVEL": "warn", **extra_env}
     proc = subprocess.Popen(
         [binary, "start", "--config", os.path.join(data, "celeris.toml")],
         env=env,

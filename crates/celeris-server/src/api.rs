@@ -25,6 +25,7 @@ use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+use crate::auth::{Denied, Scope};
 use crate::error::ApiError;
 use crate::groups::WireOp;
 use crate::node::{Node, ProposeError};
@@ -60,6 +61,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/metrics", get(metrics))
+        .route_layer(middleware::from_fn_with_state(Arc::clone(&node), authorize))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&node),
             track_metrics,
@@ -91,6 +93,104 @@ fn cors_layer(origins: &[String]) -> Option<CorsLayer> {
                 HeaderName::from_static(CONSISTENCY_HEADER),
             ]),
     )
+}
+
+/// The scope a request needs, or `None` for public endpoints (health,
+/// readiness and metrics carry no data).
+fn required_scope(method: &axum::http::Method, route: &str) -> Option<Scope> {
+    use axum::http::Method;
+    match route {
+        "/health" | "/ready" | "/metrics" => None,
+        r if r.starts_with("/v1/admin/") => Some(Scope::Admin),
+        "/v1/batch" => Some(Scope::Write),
+        "/v1/kv/{*key}" | "/v1/conflicts/{*key}"
+            if *method == Method::PUT || *method == Method::DELETE =>
+        {
+            Some(Scope::Write)
+        }
+        _ => Some(Scope::Read),
+    }
+}
+
+/// The bearer token of a request. Browsers cannot set headers on a
+/// WebSocket, so `/v1/watch` also accepts `?access_token=`.
+fn presented_token(req: &Request, route: &str) -> Option<String> {
+    let header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+        })
+        .map(|t| t.trim().to_owned());
+    if header.is_some() || route != "/v1/watch" {
+        return header;
+    }
+    req.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.strip_prefix("access_token="))
+            .map(str::to_owned)
+    })
+}
+
+/// Enforces API tokens when any are configured (see `auth.rs`).
+async fn authorize(State(node): State<AppState>, mut req: Request, next: Next) -> Response {
+    if !node.auth().enabled() {
+        return next.run(req).await;
+    }
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(String::new, |m| m.as_str().to_owned());
+    let Some(scope) = required_scope(req.method(), &route) else {
+        return next.run(req).await;
+    };
+    let token = presented_token(&req, &route);
+    match node.auth().authorize(token.as_deref(), scope) {
+        Ok(principal) => {
+            if let Some(principal) = principal {
+                req.extensions_mut().insert(principal);
+            }
+            next.run(req).await
+        }
+        Err(Denied::Unauthenticated) => {
+            let mut resp = ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "a valid API token is required: send `Authorization: Bearer <token>`",
+            )
+            .into_response();
+            resp.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer realm=\"celeris\""),
+            );
+            resp
+        }
+        Err(Denied::Forbidden { name, needs }) => {
+            ApiError::forbidden(format!("token `{name}` does not have the `{needs}` scope"))
+                .into_response()
+        }
+    }
+}
+
+/// Admin endpoints: with authentication on, the middleware has checked the
+/// `admin` scope; without it, only loopback connections are accepted.
+fn admin_allowed(
+    node: &Node,
+    peer: &Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
+) -> Result<(), ApiError> {
+    if node.auth().enabled()
+        || peer
+            .as_ref()
+            .is_ok_and(|ConnectInfo(addr)| addr.ip().is_loopback())
+    {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "admin endpoints accept loopback connections only, unless API tokens are configured",
+        ))
+    }
 }
 
 async fn track_metrics(State(node): State<AppState>, req: Request, next: Next) -> Response {
@@ -816,6 +916,9 @@ async fn clear_conflicts(
 #[serde(deny_unknown_fields)]
 struct WatchParams {
     prefix: Option<String>,
+    /// Checked by the auth middleware (browsers cannot send headers here).
+    #[serde(rename = "access_token")]
+    _access_token: Option<String>,
 }
 
 /// Streams applied changes over a WebSocket (see `events.rs`).
@@ -1017,11 +1120,7 @@ async fn rebalance(
     peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
     req: Result<Json<RebalanceRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    if !peer.is_ok_and(|ConnectInfo(addr)| addr.ip().is_loopback()) {
-        return Err(ApiError::forbidden(
-            "admin endpoints accept connections from loopback addresses only",
-        ));
-    }
+    admin_allowed(&node, &peer)?;
     let Json(req) = req.map_err(ApiError::json)?;
     let rf = req.replication_factor;
     let worker = Arc::clone(&node);
@@ -1213,18 +1312,11 @@ async fn metrics(State(node): State<AppState>) -> Result<Response, ApiError> {
         .into_response())
 }
 
-/// Admin endpoints accept loopback connections only until authentication
-/// lands (milestone M9).
 async fn shutdown(
     State(node): State<AppState>,
     peer: Result<ConnectInfo<SocketAddr>, ExtensionRejection>,
 ) -> Result<Response, ApiError> {
-    let loopback = peer.is_ok_and(|ConnectInfo(addr)| addr.ip().is_loopback());
-    if !loopback {
-        return Err(ApiError::forbidden(
-            "admin endpoints accept connections from loopback addresses only",
-        ));
-    }
+    admin_allowed(&node, &peer)?;
     node.request_shutdown();
     Ok((
         StatusCode::ACCEPTED,

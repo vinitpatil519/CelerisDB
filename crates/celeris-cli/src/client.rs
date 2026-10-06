@@ -60,6 +60,15 @@ pub enum WriteResult {
 pub struct Client {
     base: String,
     agent: ureq::Agent,
+    token: Option<String>,
+}
+
+/// The API token every client sends (`--token` / `CELERIS_TOKEN`), set
+/// once at startup.
+static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+pub fn set_token(token: Option<String>) {
+    let _ = TOKEN.set(token.filter(|t| !t.is_empty()));
 }
 
 impl Client {
@@ -74,7 +83,11 @@ impl Client {
             .timeout_connect(Duration::from_secs(3))
             .timeout(Duration::from_secs(60))
             .build();
-        Client { base, agent }
+        Client {
+            base,
+            agent,
+            token: TOKEN.get().cloned().flatten(),
+        }
     }
 
     pub fn base(&self) -> &str {
@@ -89,6 +102,9 @@ impl Client {
         body: Option<&[u8]>,
     ) -> Result<Reply, Failure> {
         let mut req = self.agent.request(method, &format!("{}{path}", self.base));
+        if let Some(token) = &self.token {
+            req = req.set("authorization", &format!("Bearer {token}"));
+        }
         for (k, v) in headers {
             req = req.set(k, v);
         }
