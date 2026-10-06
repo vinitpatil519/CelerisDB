@@ -161,4 +161,4 @@ snapshot of the whole keyspace: it pages through `scan` (D-010).
 
 ## Not yet available
 
-mTLS on the cluster port (M9).
+Certificate reload without a restart.

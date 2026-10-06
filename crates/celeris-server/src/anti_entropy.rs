@@ -162,7 +162,7 @@ async fn fetch_digest(
         id: id.to_owned(),
     };
     for _ in 0..10 {
-        match rpc::<Option<BTreeMap<u16, u64>>>(&addr, &request, RPC_TIMEOUT).await {
+        match rpc::<Option<BTreeMap<u16, u64>>>(node, &addr, &request, RPC_TIMEOUT).await {
             Ok(Some(d)) => return Some(d),
             Ok(None) => tokio::time::sleep(Duration::from_millis(200)).await,
             Err(_) => return None,
@@ -178,7 +178,7 @@ async fn repair(node: &Arc<Node>, group: &Arc<ReplicaGroup>, member: &NodeId) {
     let request = RpcRequest::Repair {
         group: group.id().to_owned(),
     };
-    if rpc::<()>(&addr, &request, RPC_TIMEOUT).await.is_ok() {
+    if rpc::<()>(node, &addr, &request, RPC_TIMEOUT).await.is_ok() {
         push_snapshot(
             Arc::clone(node),
             Arc::clone(group),

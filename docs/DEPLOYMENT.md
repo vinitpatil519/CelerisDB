@@ -9,8 +9,23 @@ speaks to the other nodes on a separate cluster port.
 | 7000 | node-to-node: gossip, Raft, snapshots, migration | other nodes only |
 
 Serve the API over HTTPS with `CELERIS_TLS_CERT` and `CELERIS_TLS_KEY`
-(see [API.md](API.md#tls)). The cluster port is not authenticated yet (see [ROADMAP.md](ROADMAP.md),
-M9), so keep it on a private network or security group.
+(see [API.md](API.md#tls)).
+
+Protect the cluster port with mutual TLS (D-033). Give every node a
+certificate from a CA dedicated to the cluster, naming the host of its
+`cluster.advertise` address (DNS name or IP SAN):
+
+```toml
+[cluster]
+tls = { cert_file = "tls/node.crt", key_file = "tls/node.key", ca_file = "tls/cluster-ca.crt" }
+```
+
+or set `CELERIS_CLUSTER_TLS_CERT`, `CELERIS_CLUSTER_TLS_KEY` and
+`CELERIS_CLUSTER_TLS_CA`. Nodes then accept only peers whose certificates
+chain to that CA, and they check that each peer they dial presents a
+certificate for the address they dialed. Every node of a cluster must use
+it; a node without TLS cannot talk to one with it. Keep the cluster port
+on a private network anyway.
 
 ## Sizing and topology
 
@@ -84,6 +99,11 @@ How it fits together:
   docker build -t ghcr.io/vinitpatil519/celeris:latest .
   kind load docker-image ghcr.io/vinitpatil519/celeris:latest
   ```
+
+For mutual TLS between pods, issue each pod a certificate for
+`<pod>.celeris-peers.<namespace>.svc.cluster.local` (cert-manager works
+well), mount it from a Secret, and set the `CELERIS_CLUSTER_TLS_*`
+variables to the mounted paths.
 
 To spread replicas across availability zones, give each pod its zone in
 `CELERIS_ZONE`. Kubernetes does not expose node labels to pods, so use one

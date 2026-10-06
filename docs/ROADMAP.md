@@ -260,7 +260,8 @@ Not done: resumable change streams (from a log position).
 * [x] Authentication: API tokens with read / write / admin scopes (D-027);
   CLI `--token`, `celeris token create`, SDK `token` options, console field.
 * [x] TLS for the client API (D-028): HTTPS + wss, CLI `--ca-cert`.
-* [ ] TLS (mTLS) on the cluster port.
+* [x] Mutual TLS on the cluster port (D-033): `cluster.tls` /
+  `CELERIS_CLUSTER_TLS_*`; foreign-CA and plain nodes are refused.
 * [x] Online backup and restore (D-029): consistent physical snapshots for
   a single node, JSON-lines export/import for any cluster.
 * [x] Criterion micro-benchmarks for the storage engine

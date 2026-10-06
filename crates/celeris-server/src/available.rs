@@ -257,7 +257,7 @@ async fn commit(node: &Arc<Node>, p: &Pending) -> anyhow::Result<()> {
         let Some(addr) = node.member_addr(&member) else {
             continue;
         };
-        match rpc::<()>(&addr, &request, FORWARD_TIMEOUT).await {
+        match rpc::<()>(node, &addr, &request, FORWARD_TIMEOUT).await {
             Ok(()) => return Ok(()),
             Err(e) => last = e,
         }
@@ -321,7 +321,7 @@ pub(crate) async fn conflicts(
             let Some(addr) = node.member_addr(member) else {
                 continue;
             };
-            if let Ok(found) = rpc::<Vec<Conflict>>(&addr, &request, FORWARD_TIMEOUT).await {
+            if let Ok(found) = rpc::<Vec<Conflict>>(node, &addr, &request, FORWARD_TIMEOUT).await {
                 got = Some(found);
                 break;
             }

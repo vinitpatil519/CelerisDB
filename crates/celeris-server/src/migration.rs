@@ -142,7 +142,7 @@ async fn import(
         let Some(addr) = node.member_addr(member) else {
             continue;
         };
-        match fetch_export(&addr, &source_group, partitions).await {
+        match fetch_export(node, &addr, &source_group, partitions).await {
             Ok(e) => {
                 entries = Some(e);
                 break;

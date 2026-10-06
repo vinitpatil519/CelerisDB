@@ -24,6 +24,24 @@ export function Order({ id }: { id: string }) {
 }`,
   },
   {
+    id: "query",
+    label: "Queries",
+    file: "report.ts",
+    code: `// Filters run on the replicas that hold the data.
+// A secondary index on "status" narrows the read.
+for await (const order of db.query({
+  prefix: "orders/",
+  where: { status: "paid", total: { $gte: 100 } },
+  fields: ["total", "customer.id"],
+})) ship(order);
+
+const { count, sum } = await db.aggregate({
+  prefix: "orders/",
+  where: { status: "paid" },
+  aggregate: { count: true, sum: ["total"] },
+});`,
+  },
+  {
     id: "python",
     label: "Python",
     file: "checkout.py",
@@ -194,6 +212,9 @@ export function Developers() {
                 </li>
                 <li>
                   <strong>Honest failures.</strong> Unknown outcomes are reported as unknown.
+                </li>
+                <li>
+                  <strong>Pushdown queries.</strong> JSON filters, indexes and aggregates run where the data lives.
                 </li>
                 <li>
                   <strong>Scoped tokens.</strong> Read, write and admin, hashed at rest.

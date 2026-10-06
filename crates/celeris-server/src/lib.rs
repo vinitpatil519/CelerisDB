@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 mod available;
 mod cluster;
+pub mod cluster_tls;
 pub mod config;
 mod error;
 pub mod events;

@@ -479,7 +479,7 @@ async fn group_scan(
         let Some(addr) = node.member_addr(member) else {
             continue;
         };
-        match crate::cluster::rpc(&addr, &request, Duration::from_secs(10)).await {
+        match crate::cluster::rpc(node, &addr, &request, Duration::from_secs(10)).await {
             Ok(records) => return Ok(records),
             Err(e) => last_error = e,
         }
@@ -636,7 +636,7 @@ async fn group_query(
         let Some(addr) = node.member_addr(member) else {
             continue;
         };
-        match crate::cluster::rpc(&addr, &request, Duration::from_secs(10)).await {
+        match crate::cluster::rpc(node, &addr, &request, Duration::from_secs(10)).await {
             Ok(part) => return Ok(part),
             Err(e) => last_error = e,
         }

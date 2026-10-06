@@ -225,6 +225,26 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-033 Mutual TLS on the cluster port
+
+* **Opt-in, all or nothing.** `cluster.tls` (certificate, key, CA) wraps
+  every node-to-node connection in TLS: gossip, Raft, pooled frames,
+  snapshots and RPCs. Framing is unchanged inside the tunnel. A plain node
+  and a TLS node cannot talk, so a cluster switches over as a whole.
+* **Who is a peer.** Inbound connections must present a client
+  certificate that chains to the cluster CA. Outbound connections verify
+  the server certificate against the same CA and the dialed host name or
+  IP, so certificates name each node's `cluster.advertise` host. Any
+  certificate from the cluster CA is a member, so the CA should sign
+  nothing else.
+* **Per node, not per process.** The TLS configuration lives on the
+  `Node`. Pooled writers are keyed by TLS mode and address, so several
+  nodes in one process (the tests) never share a connection across modes.
+* **rustls with ring**, as for HTTPS (D-028). Handshakes time out after
+  the usual I/O timeout, so a silent peer cannot hold a connection open.
+* **Not yet.** Certificate reload without a restart, and checking a
+  peer's node ID against its certificate.
+
 ## D-032 Mergeable aggregates, no server-side sort
 
 * **Count, sum, min, max.** These are the aggregates that merge exactly
@@ -339,8 +359,8 @@ Current limits:
   hyper-util with upgrades (WebSockets), injects the peer address as
   `ConnectInfo` (used by admin checks), negotiates h2 or HTTP/1.1, and drains
   connections for up to 10 s on shutdown.
-* **Not yet.** mTLS between nodes on the cluster port, and certificate
-  reload without a restart.
+* **Not yet.** Certificate reload without a restart. Nodes authenticate
+  each other with mutual TLS on the cluster port (D-033).
 
 ## D-027 API tokens with scopes
 

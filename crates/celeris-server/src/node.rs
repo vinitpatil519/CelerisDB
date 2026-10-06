@@ -188,6 +188,8 @@ pub struct Node {
     shutdown: watch::Sender<bool>,
     /// Present when the node runs with a cluster port.
     membership: Option<Mutex<Membership>>,
+    /// Mutual TLS for the cluster port (D-033), when configured.
+    cluster_tls: Option<Arc<crate::cluster_tls::ClusterTls>>,
 }
 
 impl Node {
@@ -296,6 +298,13 @@ impl Node {
         node.membership = membership;
         node.control = control;
         node.anti_entropy_interval_ms = config.cluster.anti_entropy_interval_ms;
+        if let (Some(_), Some(tls)) = (cluster_addr, &config.cluster.tls) {
+            node.cluster_tls = Some(Arc::new(crate::cluster_tls::ClusterTls::from_files(
+                &tls.cert_file,
+                &tls.key_file,
+                &tls.ca_file,
+            )?));
+        }
         node.auth = Arc::new(
             crate::auth::Authenticator::new(&config.auth.tokens).map_err(anyhow::Error::msg)?,
         );
@@ -783,7 +792,13 @@ impl Node {
             metrics: HttpMetrics::default(),
             shutdown: watch::channel(false).0,
             membership: None,
+            cluster_tls: None,
         }
+    }
+
+    /// The cluster port's TLS configuration, if any.
+    pub(crate) fn cluster_tls(&self) -> Option<Arc<crate::cluster_tls::ClusterTls>> {
+        self.cluster_tls.clone()
     }
 
     /// Runs `f` on the membership state machine with this node's monotonic

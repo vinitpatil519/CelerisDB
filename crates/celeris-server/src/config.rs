@@ -144,6 +144,21 @@ pub struct ClusterConfig {
     /// How often each group leader verifies that its replicas hold
     /// identical data (and repairs diverged ones). 0 disables it.
     pub anti_entropy_interval_ms: u64,
+    /// Mutual TLS between nodes (D-033). Every node of a cluster needs it.
+    pub tls: Option<ClusterTlsConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterTlsConfig {
+    /// PEM certificate chain of this node. It must name the host of this
+    /// node's `cluster.advertise` address (DNS name or IP SAN).
+    pub cert_file: PathBuf,
+    /// PEM private key.
+    pub key_file: PathBuf,
+    /// PEM CA that signed every node's certificate. Use a CA dedicated to
+    /// the cluster: any certificate it signed is accepted as a peer.
+    pub ca_file: PathBuf,
 }
 
 impl Default for ClusterConfig {
@@ -164,6 +179,7 @@ impl Default for ClusterConfig {
             auto_rebalance_after_ms: 30_000,
             replication_factor: 3,
             anti_entropy_interval_ms: 60_000,
+            tls: None,
         }
     }
 }
@@ -250,6 +266,13 @@ impl Config {
                     }
                 }
             }
+            if let Some(tls) = &mut config.cluster.tls {
+                for file in [&mut tls.cert_file, &mut tls.key_file, &mut tls.ca_file] {
+                    if file.is_relative() {
+                        *file = base.join(&*file);
+                    }
+                }
+            }
         }
         Ok(config)
     }
@@ -279,6 +302,23 @@ impl Config {
             }
             (None, None) => {}
             _ => bail!("set both CELERIS_TLS_CERT and CELERIS_TLS_KEY, or neither"),
+        }
+        match (
+            get("CELERIS_CLUSTER_TLS_CERT"),
+            get("CELERIS_CLUSTER_TLS_KEY"),
+            get("CELERIS_CLUSTER_TLS_CA"),
+        ) {
+            (Some(cert), Some(key), Some(ca)) => {
+                self.cluster.tls = Some(ClusterTlsConfig {
+                    cert_file: cert.into(),
+                    key_file: key.into(),
+                    ca_file: ca.into(),
+                });
+            }
+            (None, None, None) => {}
+            _ => bail!(
+                "set all of CELERIS_CLUSTER_TLS_CERT, CELERIS_CLUSTER_TLS_KEY and CELERIS_CLUSTER_TLS_CA, or none"
+            ),
         }
         if let Some(v) = get("CELERIS_REPLICATION_FACTOR") {
             self.cluster.replication_factor = v
@@ -467,6 +507,10 @@ zone = "default"
 # places partitions with this many replicas (capped at the node count).
 # 0 = wait for `celeris cluster rebalance --rf N`. [CELERIS_REPLICATION_FACTOR]
 # replication_factor = 3
+# Mutual TLS between nodes. Each node's certificate must name the host of
+# its `advertise` address; peers must chain to `ca_file`.
+# [CELERIS_CLUSTER_TLS_CERT, CELERIS_CLUSTER_TLS_KEY, CELERIS_CLUSTER_TLS_CA]
+# tls = { cert_file = "tls/node.crt", key_file = "tls/node.key", ca_file = "tls/cluster-ca.crt" }
 
 [storage]
 # "always": fsync every write before acknowledging it (survives power loss).

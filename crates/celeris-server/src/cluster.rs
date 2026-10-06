@@ -36,7 +36,9 @@ use celeris_cluster::raft::{ControlCommand, Envelope, LogIndex, Raft, RaftMessag
 use celeris_core::partition::NodeId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
+
+use crate::cluster_tls::{ClusterTls, Conn, accept, connect};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -208,15 +210,16 @@ pub(crate) fn send_group(
             from: node.node_id().clone(),
             message: e.message,
         };
+        let tls = node.cluster_tls();
         if bulky {
             // Entries can be megabytes; encode them off the runtime threads.
             tokio::spawn(async move {
                 if let Ok(bytes) = tokio::task::spawn_blocking(move || encode(&frame)).await {
-                    send(addr, bytes).await;
+                    send(tls, addr, bytes).await;
                 }
             });
         } else {
-            tokio::spawn(send(addr, encode(&frame)));
+            tokio::spawn(send(tls, addr, encode(&frame)));
         }
     }
 }
@@ -267,7 +270,7 @@ pub(crate) async fn push_snapshot(
     };
     let result = match encode_snapshot(&header, &payload.data) {
         Ok(stream) => tokio::time::timeout(SNAPSHOT_TIMEOUT, async {
-            let mut conn = TcpStream::connect(&addr).await?;
+            let mut conn = connect(node.cluster_tls().as_deref(), &addr).await?;
             conn.write_all(&stream).await?;
             conn.shutdown().await
         })
@@ -335,7 +338,7 @@ async fn read_snapshot<R: AsyncReadExt + Unpin>(
 
 /// Reads the next frame of a pooled connection. `None` when the sender
 /// closed it, or it stayed idle for `INBOUND_IDLE`.
-async fn read_next_frame(stream: &mut TcpStream) -> anyhow::Result<Option<Frame>> {
+async fn read_next_frame(stream: &mut Conn) -> anyhow::Result<Option<Frame>> {
     let mut magic = [0u8; 4];
     match tokio::time::timeout(INBOUND_IDLE, stream.read_exact(&mut magic)).await {
         Err(_) => return Ok(None),
@@ -349,7 +352,7 @@ async fn read_next_frame(stream: &mut TcpStream) -> anyhow::Result<Option<Frame>
 
 /// Reads one inbound connection: a frame (timeout scaled to its size) or a
 /// snapshot stream (long timeout).
-async fn read_inbound(stream: &mut TcpStream) -> anyhow::Result<Inbound> {
+async fn read_inbound(stream: &mut Conn) -> anyhow::Result<Inbound> {
     let mut magic = [0u8; 4];
     tokio::time::timeout(IO_TIMEOUT, stream.read_exact(&mut magic))
         .await
@@ -380,7 +383,7 @@ async fn read_inbound(stream: &mut TcpStream) -> anyhow::Result<Inbound> {
 }
 
 /// Answers a request from another node on the same connection.
-async fn handle_rpc(node: Arc<Node>, request: RpcRequest, stream: &mut TcpStream) {
+async fn handle_rpc(node: Arc<Node>, request: RpcRequest, stream: &mut Conn) {
     let result: anyhow::Result<Vec<u8>> = match request {
         RpcRequest::Export { group, partitions } => match node.group(&group) {
             None => Err(anyhow::anyhow!("no replication group {group} here")),
@@ -473,13 +476,15 @@ async fn handle_rpc(node: Arc<Node>, request: RpcRequest, stream: &mut TcpStream
 
 /// Sends a request to the node at `addr` and parses its answer.
 pub(crate) async fn rpc<T: serde::de::DeserializeOwned + Send + 'static>(
+    node: &Node,
     addr: &str,
     request: &RpcRequest,
     timeout: Duration,
 ) -> anyhow::Result<T> {
     let request = serde_json::to_vec(request)?;
+    let tls = node.cluster_tls();
     tokio::time::timeout(timeout, async {
-        let mut conn = TcpStream::connect(addr).await?;
+        let mut conn = connect(tls.as_deref(), addr).await?;
         let mut head = RPC_REQUEST_MAGIC.to_vec();
         head.push(RPC_VERSION);
         head.extend_from_slice(&(request.len() as u32).to_be_bytes());
@@ -509,6 +514,7 @@ pub(crate) async fn rpc<T: serde::de::DeserializeOwned + Send + 'static>(
 
 /// Fetches fenced partitions' data from a source replica at `addr`.
 pub(crate) async fn fetch_export(
+    node: &Node,
     addr: &str,
     group: &str,
     partitions: &[u16],
@@ -517,7 +523,7 @@ pub(crate) async fn fetch_export(
         group: group.to_owned(),
         partitions: partitions.to_vec(),
     };
-    rpc(addr, &request, SNAPSHOT_TIMEOUT).await
+    rpc(node, addr, &request, SNAPSHOT_TIMEOUT).await
 }
 /// Gets a control command proposed by whichever voter currently leads:
 /// tried locally, and forwarded to every other member.
@@ -542,7 +548,7 @@ pub(crate) async fn propose_control(node: &Arc<Node>, command: ControlCommand) {
         let frame = Frame::ControlPropose {
             command: command.clone(),
         };
-        tokio::spawn(send(addr, encode(&frame)));
+        tokio::spawn(send(node.cluster_tls(), addr, encode(&frame)));
     }
 }
 
@@ -562,7 +568,7 @@ pub(crate) fn forward_rebalance(node: &Node, leader: &NodeId, rf: u8) -> bool {
             replication_factor: rf,
         },
     };
-    tokio::spawn(send(addr, encode(&frame)));
+    tokio::spawn(send(node.cluster_tls(), addr, encode(&frame)));
     true
 }
 
@@ -661,17 +667,19 @@ static POOL: std::sync::LazyLock<
 /// connection each, which would exhaust ephemeral ports with sockets in
 /// TIME_WAIT. Bulky frames get their own connection so they do not hold
 /// up the small ones.
-async fn send(addr: String, frame: Vec<u8>) {
+async fn send(tls: Option<Arc<ClusterTls>>, addr: String, frame: Vec<u8>) {
     if frame.len() > BULKY_FRAME_BYTES {
-        return send_direct(addr, frame).await;
+        return send_direct(tls, addr, frame).await;
     }
+    // Plain and TLS connections to one address never share a writer.
+    let key = format!("{}{addr}", if tls.is_some() { "tls:" } else { "" });
     let mut frame = frame;
     for _ in 0..2 {
         let tx = POOL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(addr.clone())
-            .or_insert_with(|| spawn_writer(addr.clone()))
+            .entry(key.clone())
+            .or_insert_with(|| spawn_writer(tls.clone(), addr.clone(), key.clone()))
             .clone();
         match tx.try_send(frame) {
             Ok(()) => return,
@@ -685,8 +693,8 @@ async fn send(addr: String, frame: Vec<u8>) {
                 let mut pool = POOL
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if pool.get(&addr).is_some_and(|t| t.same_channel(&tx)) {
-                    pool.remove(&addr);
+                if pool.get(&key).is_some_and(|t| t.same_channel(&tx)) {
+                    pool.remove(&key);
                 }
             }
         }
@@ -696,15 +704,18 @@ async fn send(addr: String, frame: Vec<u8>) {
 /// Owns the pooled connection to one peer: connects on demand, writes
 /// queued frames in order, reconnects after an error (dropping the frame
 /// that failed), and exits when idle.
-fn spawn_writer(addr: String) -> tokio::sync::mpsc::Sender<Vec<u8>> {
+fn spawn_writer(
+    tls: Option<Arc<ClusterTls>>,
+    addr: String,
+    key: String,
+) -> tokio::sync::mpsc::Sender<Vec<u8>> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(POOL_QUEUE);
     tokio::spawn(async move {
-        let mut stream: Option<TcpStream> = None;
+        let mut stream: Option<Conn> = None;
         while let Ok(Some(frame)) = tokio::time::timeout(POOL_IDLE, rx.recv()).await {
             if stream.is_none() {
-                match tokio::time::timeout(IO_TIMEOUT, TcpStream::connect(&addr)).await {
+                match tokio::time::timeout(IO_TIMEOUT, connect(tls.as_deref(), &addr)).await {
                     Ok(Ok(s)) => {
-                        let _ = s.set_nodelay(true);
                         stream = Some(s);
                     }
                     Ok(Err(e)) => {
@@ -731,10 +742,10 @@ fn spawn_writer(addr: String) -> tokio::sync::mpsc::Sender<Vec<u8>> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if pool
-            .get(&addr)
+            .get(&key)
             .is_some_and(tokio::sync::mpsc::Sender::is_closed)
         {
-            pool.remove(&addr);
+            pool.remove(&key);
         }
     });
     tx
@@ -742,9 +753,9 @@ fn spawn_writer(addr: String) -> tokio::sync::mpsc::Sender<Vec<u8>> {
 
 /// Sends a frame over a connection of its own and waits until it is
 /// written.
-async fn send_direct(addr: String, frame: Vec<u8>) {
+async fn send_direct(tls: Option<Arc<ClusterTls>>, addr: String, frame: Vec<u8>) {
     let result = tokio::time::timeout(transfer_timeout(frame.len()), async {
-        let mut stream = TcpStream::connect(&addr).await?;
+        let mut stream = connect(tls.as_deref(), &addr).await?;
         stream.write_all(&frame).await?;
         stream.shutdown().await
     })
@@ -756,9 +767,13 @@ async fn send_direct(addr: String, frame: Vec<u8>) {
     }
 }
 
-fn dispatch_membership(outs: Vec<celeris_cluster::Outgoing>) {
+fn dispatch_membership(node: &Node, outs: Vec<celeris_cluster::Outgoing>) {
     for o in outs {
-        tokio::spawn(send(o.addr, encode(&Frame::Membership(o.message))));
+        tokio::spawn(send(
+            node.cluster_tls(),
+            o.addr,
+            encode(&Frame::Membership(o.message)),
+        ));
     }
 }
 
@@ -772,7 +787,7 @@ pub(crate) fn send_raft(node: &Node, out: Vec<Envelope<ControlCommand>>) {
                     from: node.node_id().clone(),
                     message: e.message,
                 };
-                tokio::spawn(send(addr, encode(&frame)));
+                tokio::spawn(send(node.cluster_tls(), addr, encode(&frame)));
             }
             None => debug!(peer = %e.to, "no cluster address for raft peer yet"),
         }
@@ -806,6 +821,7 @@ async fn handle_frame(node: Arc<Node>, frame: Frame) {
     match frame {
         Frame::Membership(msg) => {
             dispatch_membership(
+                &node,
                 node.with_membership(|m, now| m.handle(now, msg))
                     .unwrap_or_default(),
             );
@@ -863,7 +879,7 @@ pub(crate) async fn run(node: Arc<Node>, listener: TcpListener, mut stop: watch:
                 since_gossip += tick_ms;
                 if since_gossip >= gossip_ms {
                     since_gossip = 0;
-                    dispatch_membership(node.with_membership(|m, now| m.tick(now)).unwrap_or_default());
+                    dispatch_membership(&node, node.with_membership(|m, now| m.tick(now)).unwrap_or_default());
                 }
                 since_group_check += tick_ms;
                 if since_group_check >= GROUP_CHECK_MS {
@@ -913,9 +929,22 @@ pub(crate) async fn run(node: Arc<Node>, listener: TcpListener, mut stop: watch:
                 }
             }
             accepted = listener.accept() => match accepted {
-                Ok((mut stream, peer)) => {
+                Ok((tcp, peer)) => {
                     let node = Arc::clone(&node);
                     tokio::spawn(async move {
+                        let tls = node.cluster_tls();
+                        let mut stream =
+                            match tokio::time::timeout(IO_TIMEOUT, accept(tls.as_deref(), tcp)).await {
+                                Ok(Ok(s)) => s,
+                                Ok(Err(e)) => {
+                                    warn!(%peer, error = %e, "cluster TLS handshake failed");
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!(%peer, "cluster TLS handshake timed out");
+                                    return;
+                                }
+                            };
                         match read_inbound(&mut stream).await {
                             Ok(Inbound::Frame(frame)) => {
                                 // A pooled connection carries more frames. It
@@ -960,7 +989,13 @@ pub(crate) async fn run(node: Arc<Node>, listener: TcpListener, mut stop: watch:
         .with_membership(|m, now| m.leave(now))
         .unwrap_or_default()
         .into_iter()
-        .map(|o| tokio::spawn(send_direct(o.addr, encode(&Frame::Membership(o.message)))))
+        .map(|o| {
+            tokio::spawn(send_direct(
+                node.cluster_tls(),
+                o.addr,
+                encode(&Frame::Membership(o.message)),
+            ))
+        })
         .collect();
     for handle in leaving {
         let _ = handle.await;
