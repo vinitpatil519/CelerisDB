@@ -281,6 +281,32 @@ pub struct ScanPage<T> {
     pub partial: bool,
 }
 
+/// A filtered query (`POST /v1/query`), evaluated on the server.
+#[derive(Debug, Clone, Default)]
+pub struct QueryOptions {
+    /// Key range and page size, as for scans.
+    pub range: ScanOptions,
+    /// MongoDB-style filter, e.g.
+    /// `json!({"status": "paid", "total": {"$gte": 100}})`. Operators:
+    /// `$eq $ne $gt $gte $lt $lte $in $nin $exists $prefix $contains`,
+    /// combined with `$and`, `$or` and `$not`.
+    pub filter: Option<serde_json::Value>,
+    /// Return only these fields (dotted paths).
+    pub fields: Option<Vec<String>>,
+    /// Rows each request may read on the server (default 10000).
+    pub max_scanned: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryPage<T> {
+    pub items: Vec<Item<T>>,
+    /// Set while the range is not done, even on a page with few items.
+    pub next_cursor: Option<String>,
+    pub partial: bool,
+    /// Rows the server read for this page, matching or not.
+    pub scanned: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationStatus {
     Committed {
@@ -675,6 +701,66 @@ impl Client {
         }
     }
 
+    /// One page of a filtered query. The server stops after
+    /// `max_scanned` rows, so a page can be short and still have a cursor.
+    pub async fn query_page<T: DeserializeOwned>(
+        &self,
+        options: &QueryOptions,
+        after: Option<&str>,
+    ) -> Result<QueryPage<T>> {
+        let r = &options.range;
+        let mut body = serde_json::Map::new();
+        let mut set = |k: &str, v: Option<serde_json::Value>| {
+            if let Some(v) = v {
+                body.insert(k.to_owned(), v);
+            }
+        };
+        set("prefix", r.prefix.clone().map(Into::into));
+        set("start", r.start.clone().map(Into::into));
+        set("end", r.end.clone().map(Into::into));
+        set("limit", r.limit.map(Into::into));
+        set("consistency", self.mode(r.consistency).map(Into::into));
+        set("where", options.filter.clone());
+        set("fields", options.fields.clone().map(Into::into));
+        set("max_scanned", options.max_scanned.map(Into::into));
+        set("after", after.map(Into::into));
+        let body = serde_json::to_vec(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        let raw = self
+            .read_with_body(Method::POST, "/v1/query", &[], Some(body))
+            .await?
+            .ok()?;
+        let applied = raw.body["consistency"].as_str();
+        let items = raw.body["items"]
+            .as_array()
+            .ok_or_else(|| Error::Decode("query response without items".into()))?
+            .iter()
+            .map(|i| item(i, applied))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(QueryPage {
+            items,
+            next_cursor: raw.body["next_cursor"].as_str().map(str::to_owned),
+            partial: raw.body["partial"].as_bool().unwrap_or(false),
+            scanned: raw.body["scanned"].as_u64().unwrap_or(0),
+        })
+    }
+
+    /// Every matching item, following cursors to the end of the range.
+    pub async fn query_all<T: DeserializeOwned>(
+        &self,
+        options: &QueryOptions,
+    ) -> Result<Vec<Item<T>>> {
+        let mut out = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = self.query_page::<T>(options, after.as_deref()).await?;
+            out.extend(page.items);
+            match page.next_cursor {
+                Some(cursor) => after = Some(cursor),
+                None => return Ok(out),
+            }
+        }
+    }
+
     // -- mutations, conflicts, status -----------------------------------------
 
     /// Whether a mutation committed (within the server's retention window).
@@ -823,12 +909,25 @@ impl Client {
 
     /// Reads and other idempotent calls: retried on any failure.
     async fn read(&self, method: Method, path: &str, headers: &[(&str, String)]) -> Result<Raw> {
+        self.read_with_body(method, path, headers, None).await
+    }
+
+    async fn read_with_body(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Raw> {
         let start = self.start();
         let mut last = String::new();
         let mut last_error = None;
         for attempt in 0..self.attempts {
             let node = (start + attempt) % self.nodes.len();
-            match self.send(node, method.clone(), path, headers, None).await {
+            match self
+                .send(node, method.clone(), path, headers, body.clone())
+                .await
+            {
                 Err(SendError::NotSent(e) | SendError::MaybeSent(e)) => last = e,
                 Ok(raw) if raw.retryable() => {
                     last_error = Some(Error::from_body(raw.status, &raw.body));

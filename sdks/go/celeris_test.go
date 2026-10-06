@@ -171,6 +171,44 @@ func TestScan(t *testing.T) {
 	}
 }
 
+func TestQuery(t *testing.T) {
+	c, ctx, p := node(t), context.Background(), unique(t)
+	for i := 0; i < 12; i++ {
+		tags := []string{}
+		if i%3 == 0 {
+			tags = append(tags, "fizz")
+		}
+		doc := map[string]any{"n": i, "tags": tags}
+		if _, err := c.Put(ctx, fmt.Sprintf("%s%02d", p, i), doc, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := c.QueryPage(ctx, &QueryOptions{
+		ScanOptions: ScanOptions{Prefix: p},
+		Where:       map[string]any{"tags": map[string]any{"$contains": "fizz"}, "n": map[string]any{"$gt": 0}},
+		Fields:      []string{"n"},
+	}, "")
+	if err != nil || len(page.Items) != 3 || string(page.Items[0].Value) != `{"n":3}` || page.NextCursor != "" || page.Scanned != 12 {
+		t.Fatalf("page: %+v %v", page, err)
+	}
+	var keys []string
+	err = c.Query(ctx, &QueryOptions{
+		ScanOptions: ScanOptions{Prefix: p},
+		Where:       map[string]any{"n": map[string]any{"$lt": 5}},
+		MaxScanned:  2,
+	}, func(i Item) bool {
+		keys = append(keys, i.Key)
+		return true
+	})
+	if err != nil || len(keys) != 5 || keys[4] != p+"04" {
+		t.Fatalf("query: %v %v", keys, err)
+	}
+	_, err = c.QueryPage(ctx, &QueryOptions{Where: map[string]any{"n": map[string]any{"$nope": 1}}}, "")
+	if !IsCode(err, "invalid_filter") {
+		t.Fatalf("bad filter: %v", err)
+	}
+}
+
 func TestWatch(t *testing.T) {
 	c, p := node(t), unique(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

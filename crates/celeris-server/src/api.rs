@@ -41,6 +41,8 @@ pub const CONSISTENCY_HEADER: &str = "celeris-consistency";
 const MAX_BODY_BYTES: usize = 40 * 1024 * 1024;
 const DEFAULT_SCAN_LIMIT: usize = 100;
 const MAX_SCAN_LIMIT: usize = 1000;
+const DEFAULT_MAX_SCANNED: usize = 10_000;
+const MAX_MAX_SCANNED: usize = 100_000;
 
 type AppState = Arc<Node>;
 
@@ -49,6 +51,7 @@ pub fn router(node: Arc<Node>) -> Router {
         .route("/v1/kv/{*key}", get(get_kv).put(put_kv).delete(delete_kv))
         .route("/v1/batch", post(batch))
         .route("/v1/scan", get(scan))
+        .route("/v1/query", post(query))
         .route("/v1/mutations/{id}", get(mutation_status))
         .route("/v1/conflicts", get(list_conflicts))
         .route("/v1/watch", get(watch))
@@ -790,35 +793,7 @@ async fn scan(
             format!("limit must be between 1 and {MAX_SCAN_LIMIT}"),
         ));
     }
-    let (mut lo, hi) = match (&p.prefix, &p.start, &p.end) {
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-            return Err(ApiError::bad_request(
-                "invalid_argument",
-                "use either prefix or start/end, not both",
-            ));
-        }
-        (Some(prefix), None, None) => (
-            Bound::Included(prefix.clone().into_bytes()),
-            prefix_successor(prefix.as_bytes()).map_or(Bound::Unbounded, Bound::Excluded),
-        ),
-        (None, start, end) => (
-            start
-                .clone()
-                .map_or(Bound::Unbounded, |s| Bound::Included(s.into_bytes())),
-            end.clone()
-                .map_or(Bound::Unbounded, |e| Bound::Excluded(e.into_bytes())),
-        ),
-    };
-    if let Some(after) = p.after {
-        let after = after.into_bytes();
-        let past_start = match &lo {
-            Bound::Included(s) | Bound::Excluded(s) => after >= *s,
-            Bound::Unbounded => true,
-        };
-        if past_start {
-            lo = Bound::Excluded(after);
-        }
-    }
+    let (lo, hi) = key_range(p.prefix, p.start, p.end, p.after)?;
     node.metrics().record_consistency(mode, false);
     let (records, cluster_partial) = if node.is_replicated() {
         let range = replicated::ScanRange {
@@ -867,6 +842,175 @@ async fn scan(
         next_cursor,
         consistency: mode.as_str(),
         partial: cluster_partial,
+    })
+    .into_response();
+    resp.headers_mut()
+        .insert(CONSISTENCY_HEADER, HeaderValue::from_static(mode.as_str()));
+    Ok(resp)
+}
+
+type KeyRange = (Bound<Vec<u8>>, Bound<Vec<u8>>);
+
+/// The key range of a scan or query: `prefix`, or `start` (inclusive) and
+/// `end` (exclusive), continuing after the cursor `after`.
+fn key_range(
+    prefix: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    after: Option<String>,
+) -> Result<KeyRange, ApiError> {
+    let (mut lo, hi) = match (prefix, start, end) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            return Err(ApiError::bad_request(
+                "invalid_argument",
+                "use either prefix or start/end, not both",
+            ));
+        }
+        (Some(prefix), None, None) => {
+            let hi = prefix_successor(prefix.as_bytes()).map_or(Bound::Unbounded, Bound::Excluded);
+            (Bound::Included(prefix.into_bytes()), hi)
+        }
+        (None, start, end) => (
+            start.map_or(Bound::Unbounded, |s| Bound::Included(s.into_bytes())),
+            end.map_or(Bound::Unbounded, |e| Bound::Excluded(e.into_bytes())),
+        ),
+    };
+    if let Some(after) = after {
+        let after = after.into_bytes();
+        let past_start = match &lo {
+            Bound::Included(s) | Bound::Excluded(s) => after >= *s,
+            Bound::Unbounded => true,
+        };
+        if past_start {
+            lo = Bound::Excluded(after);
+        }
+    }
+    Ok((lo, hi))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryRequest {
+    prefix: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    after: Option<String>,
+    #[serde(rename = "where")]
+    filter: Option<Value>,
+    fields: Option<Vec<String>>,
+    limit: Option<usize>,
+    max_scanned: Option<usize>,
+    consistency: Option<String>,
+    max_staleness_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct QueryItem {
+    key: String,
+    value: Value,
+    version: u64,
+    expires_at_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct QueryResponse {
+    items: Vec<QueryItem>,
+    /// Pass as `after` to continue; `null` once the range is done. A page
+    /// can hold fewer than `limit` items and still have a cursor.
+    next_cursor: Option<String>,
+    /// Rows read to answer this page, matching or not.
+    scanned: usize,
+    consistency: &'static str,
+    partial: bool,
+}
+
+/// `POST /v1/query`: a range scan with a JSON filter and projection,
+/// evaluated next to the data (D-030).
+async fn query(
+    State(node): State<AppState>,
+    req: Result<Json<QueryRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(req) = req.map_err(ApiError::json)?;
+    let mode = read_mode(req.consistency.as_deref(), req.max_staleness_ms)?;
+    let limit = req.limit.unwrap_or(DEFAULT_SCAN_LIMIT);
+    if limit == 0 || limit > MAX_SCAN_LIMIT {
+        return Err(ApiError::bad_request(
+            "invalid_argument",
+            format!("limit must be between 1 and {MAX_SCAN_LIMIT}"),
+        ));
+    }
+    let max_scanned = req.max_scanned.unwrap_or(DEFAULT_MAX_SCANNED);
+    if max_scanned == 0 || max_scanned > MAX_MAX_SCANNED {
+        return Err(ApiError::bad_request(
+            "invalid_argument",
+            format!("max_scanned must be between 1 and {MAX_MAX_SCANNED}"),
+        ));
+    }
+    let filter = req
+        .filter
+        .as_ref()
+        .map(crate::query::Filter::parse)
+        .transpose()
+        .map_err(|e| ApiError::bad_request("invalid_filter", e))?;
+    let fields = req
+        .fields
+        .as_deref()
+        .map(crate::query::parse_fields)
+        .transpose()
+        .map_err(|e| ApiError::bad_request("invalid_argument", e))?;
+    let (lo, hi) = key_range(req.prefix, req.start, req.end, req.after)?;
+    node.metrics().record_consistency(mode, false);
+    let (page, partial) = if node.is_replicated() {
+        let range = replicated::QueryRange {
+            lo: replicated::WireBound::from_bound(&lo),
+            hi: replicated::WireBound::from_bound(&hi),
+            filter: req.filter,
+            limit,
+            max_scanned,
+        };
+        replicated::query(&node, range, mode).await?
+    } else {
+        let page = node
+            .blocking(move |e| {
+                crate::query::filtered_scan(e, lo, hi, filter.as_ref(), limit, max_scanned, |_| {
+                    true
+                })
+            })
+            .await
+            .map_err(|e| ApiError::internal(format!("query task failed: {e}")))?
+            .map_err(|e| ApiError::storage(e, None))?;
+        let partial = node
+            .partitions()
+            .nodes()
+            .iter()
+            .any(|n| n.id != *node.node_id());
+        (page, partial)
+    };
+    let items = page
+        .records
+        .iter()
+        .map(|r| {
+            let value: Value = serde_json::from_slice(&r.value)
+                .map_err(|e| ApiError::internal(format!("stored value is not JSON: {e}")))?;
+            Ok(QueryItem {
+                key: String::from_utf8_lossy(&r.key).into_owned(),
+                value: match &fields {
+                    Some(f) => crate::query::project(&value, f),
+                    None => value,
+                },
+                version: r.version,
+                expires_at_ms: r.expires_at_ms,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let mut resp = Json(QueryResponse {
+        items,
+        next_cursor: page
+            .resume
+            .map(|k| String::from_utf8_lossy(&k).into_owned()),
+        scanned: page.scanned,
+        consistency: mode.as_str(),
+        partial,
     })
     .into_response();
     resp.headers_mut()

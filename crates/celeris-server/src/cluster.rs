@@ -114,6 +114,13 @@ pub(crate) enum RpcRequest {
         range: crate::replicated::ScanRange,
         strict: bool,
     },
+    /// A cluster-wide query asks a group replica to filter its part of a
+    /// range (D-030). Answer: `WireQueryPart`.
+    Query {
+        group: String,
+        range: crate::replicated::QueryRange,
+        strict: bool,
+    },
     /// A node holding a pending `available` write asks the group leader to
     /// commit it (D-023). Answer: `()` once applied.
     Forward { group: String, command: DataCommand },
@@ -397,6 +404,16 @@ async fn handle_rpc(node: Arc<Node>, request: RpcRequest, stream: &mut TcpStream
             Some(group) => crate::replicated::local_group_scan(&node, &group, &range, strict)
                 .await
                 .and_then(|records| Ok(serde_json::to_vec(&records)?)),
+        },
+        RpcRequest::Query {
+            group,
+            range,
+            strict,
+        } => match node.group(&group) {
+            None => Err(anyhow::anyhow!("no replication group {group} here")),
+            Some(group) => crate::replicated::local_group_query(&node, &group, &range, strict)
+                .await
+                .and_then(|part| Ok(serde_json::to_vec(&part)?)),
         },
         RpcRequest::Forward { group, command } => match node.group(&group) {
             None => Err(anyhow::anyhow!("no replication group {group} here")),

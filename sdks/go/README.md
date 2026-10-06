@@ -31,6 +31,13 @@ err = db.Scan(ctx, &celeris.ScanOptions{Prefix: "orders/"}, func(it celeris.Item
     fmt.Println(it.Key, string(it.Value))
     return true
 })
+
+// Filtered on the server; only matches come back
+err = db.Query(ctx, &celeris.QueryOptions{
+    ScanOptions: celeris.ScanOptions{Prefix: "orders/"},
+    Where:       map[string]any{"status": "paid", "total": map[string]any{"$gte": 100}},
+    Fields:      []string{"total"},
+}, func(it celeris.Item) bool { fmt.Println(it.Key, string(it.Value)); return true })
 ```
 
 `Get` returns `(nil, nil)` for a missing key.

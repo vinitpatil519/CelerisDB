@@ -197,6 +197,18 @@ impl Client {
             .map_err(|f| anyhow::anyhow!("cannot reach node at {}: {f}", self.base))
     }
 
+    /// POST of a JSON body for read-only calls (queries).
+    pub fn post_read(&self, path: &str, body: &Value) -> anyhow::Result<Reply> {
+        let bytes = serde_json::to_vec(body)?;
+        self.send(
+            "POST",
+            path,
+            &[("content-type", "application/json")],
+            Some(&bytes),
+        )
+        .map_err(|f| anyhow::anyhow!("cannot reach node at {}: {f}", self.base))
+    }
+
     /// Sends a mutation, retrying transport failures with the same mutation
     /// ID. The server deduplicates by ID, so retries never apply twice.
     pub fn write(

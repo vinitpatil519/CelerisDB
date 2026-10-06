@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 use crate::error::ApiError;
 use crate::groups::{Applied, DataCommand, PartitionState, Proposed, ReplicaGroup, WireOp};
 use crate::node::{GroupLookup, Node};
+use crate::query::{Filter, FilteredScan, merge_parts};
 
 /// Applied log index of the replication group. Returned on writes; sent
 /// back on `session` reads to get read-your-writes from any replica.
@@ -337,6 +338,27 @@ impl WireRecord {
     }
 }
 
+/// Commits a read barrier through `group`, proving this replica leads it
+/// and has applied everything committed before the read.
+async fn confirm_leader(node: &Arc<Node>, group: &Arc<ReplicaGroup>) -> anyhow::Result<()> {
+    let (_, done) = propose(node, group, DataCommand::Barrier)
+        .await
+        .map_err(|_| anyhow::anyhow!("this replica is not the leader of group {}", group.id()))?;
+    match tokio::time::timeout(COMMIT_TIMEOUT, done).await {
+        Ok(Ok(Applied::Barrier)) => Ok(()),
+        _ => anyhow::bail!("could not confirm leadership of group {}", group.id()),
+    }
+}
+
+/// Partitions `group` serves now. Its engine can also hold rows of
+/// partitions being imported or not yet purged; reads skip those.
+fn served_partitions(node: &Node, group: &ReplicaGroup) -> std::collections::BTreeSet<u16> {
+    node.serving_groups()
+        .remove(group.id())
+        .map(|(_, partitions)| partitions.into_iter().collect())
+        .unwrap_or_default()
+}
+
 /// This replica's part of a scan for `group`: the first `limit` records in
 /// the range among the partitions the group currently serves. `strict`
 /// requires the leader and a read barrier first.
@@ -347,21 +369,9 @@ pub(crate) async fn local_group_scan(
     strict: bool,
 ) -> anyhow::Result<Vec<WireRecord>> {
     if strict {
-        let (_, done) = propose(node, group, DataCommand::Barrier)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("this replica is not the leader of group {}", group.id())
-            })?;
-        match tokio::time::timeout(COMMIT_TIMEOUT, done).await {
-            Ok(Ok(Applied::Barrier)) => {}
-            _ => anyhow::bail!("could not confirm leadership of group {}", group.id()),
-        }
+        confirm_leader(node, group).await?;
     }
-    let served: std::collections::BTreeSet<u16> = node
-        .serving_groups()
-        .remove(group.id())
-        .map(|(_, partitions)| partitions.into_iter().collect())
-        .unwrap_or_default();
+    let served = served_partitions(node, group);
     let engine = group.engine();
     let (mut lo, hi, limit) = (range.lo.to_bound(), range.hi.to_bound(), range.limit);
     tokio::task::spawn_blocking(move || {
@@ -471,6 +481,159 @@ async fn group_scan(
         };
         match crate::cluster::rpc(&addr, &request, Duration::from_secs(10)).await {
             Ok(records) => return Ok(records),
+            Err(e) => last_error = e,
+        }
+    }
+    Err(last_error)
+}
+
+/// A filtered query as sent between nodes (D-030). The filter travels as
+/// its JSON document and is parsed again by the replica.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueryRange {
+    pub lo: WireBound,
+    pub hi: WireBound,
+    pub filter: Option<serde_json::Value>,
+    pub limit: usize,
+    pub max_scanned: usize,
+}
+
+/// One group's answer to a query.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WireQueryPart {
+    pub records: Vec<WireRecord>,
+    pub resume: Option<String>,
+    pub scanned: usize,
+}
+
+impl WireQueryPart {
+    fn into_scan(self) -> FilteredScan {
+        FilteredScan {
+            records: self
+                .records
+                .into_iter()
+                .map(WireRecord::into_record)
+                .collect(),
+            resume: self.resume.map(String::into_bytes),
+            scanned: self.scanned,
+        }
+    }
+}
+
+/// This replica's part of a query for `group`: like a scan, but filtered
+/// here and bounded by `max_scanned` rows.
+pub(crate) async fn local_group_query(
+    node: &Arc<Node>,
+    group: &Arc<ReplicaGroup>,
+    range: &QueryRange,
+    strict: bool,
+) -> anyhow::Result<WireQueryPart> {
+    let filter = range
+        .filter
+        .as_ref()
+        .map(Filter::parse)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("invalid filter: {e}"))?;
+    if strict {
+        confirm_leader(node, group).await?;
+    }
+    let served = served_partitions(node, group);
+    let engine = group.engine();
+    let (lo, hi) = (range.lo.to_bound(), range.hi.to_bound());
+    let (limit, max_scanned) = (range.limit, range.max_scanned);
+    let part = tokio::task::spawn_blocking(move || {
+        crate::query::filtered_scan(&engine, lo, hi, filter.as_ref(), limit, max_scanned, |r| {
+            served.contains(&celeris_core::partition::partition_for(&r.key).get())
+        })
+    })
+    .await??;
+    Ok(WireQueryPart {
+        records: part
+            .records
+            .into_iter()
+            .map(WireRecord::from_record)
+            .collect(),
+        resume: part
+            .resume
+            .map(|k| String::from_utf8_lossy(&k).into_owned()),
+        scanned: part.scanned,
+    })
+}
+
+/// A query over the whole cluster: every serving group filters its part of
+/// the range, and the parts are merged so no key is skipped between pages.
+pub(crate) async fn query(
+    node: &Arc<Node>,
+    range: QueryRange,
+    mode: Consistency,
+) -> Result<(FilteredScan, bool), ApiError> {
+    if let GroupLookup::NoMap = node.resolve_group(&[]) {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_partition_map",
+            "the control plane has not committed a partition map yet (run `celeris cluster rebalance`)",
+        ));
+    }
+    let strict = !matches!(mode, Consistency::Available | Consistency::Eventual);
+    let limit = range.limit;
+    let mut tasks = tokio::task::JoinSet::new();
+    for (gid, (members, _)) in node.serving_groups() {
+        let (node, range) = (Arc::clone(node), range.clone());
+        tasks.spawn(async move { group_query(&node, &gid, &members, &range, strict).await });
+    }
+    let mut parts = Vec::new();
+    let mut failures = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(part)) => parts.push(part.into_scan()),
+            Ok(Err(e)) => failures.push(format!("{e:#}")),
+            Err(e) => failures.push(e.to_string()),
+        }
+    }
+    if strict && !failures.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "query_incomplete",
+            "some replication groups could not serve a consistent query; retry",
+        )
+        .with_detail("errors", json!(failures)));
+    }
+    Ok((merge_parts(parts, limit), !failures.is_empty()))
+}
+
+/// Gets one group's part of a query: locally when this node can serve it,
+/// otherwise from the group's leader or any member.
+async fn group_query(
+    node: &Arc<Node>,
+    gid: &str,
+    members: &[NodeId],
+    range: &QueryRange,
+    strict: bool,
+) -> anyhow::Result<WireQueryPart> {
+    let mut leader = None;
+    if let Some(group) = node.group(gid) {
+        let (role, _, known_leader, _, _) = group.status();
+        if !strict || role == celeris_cluster::raft::Role::Leader {
+            return local_group_query(node, &group, range, strict).await;
+        }
+        leader = known_leader;
+    }
+    let mut candidates: Vec<&NodeId> = members.iter().filter(|m| *m != node.node_id()).collect();
+    if let Some(l) = &leader {
+        candidates.sort_by_key(|m| *m != l);
+    }
+    let request = crate::cluster::RpcRequest::Query {
+        group: gid.to_owned(),
+        range: range.clone(),
+        strict,
+    };
+    let mut last_error = anyhow::anyhow!("no reachable replica of group {gid}");
+    for member in candidates {
+        let Some(addr) = node.member_addr(member) else {
+            continue;
+        };
+        match crate::cluster::rpc(&addr, &request, Duration::from_secs(10)).await {
+            Ok(part) => return Ok(part),
             Err(e) => last_error = e,
         }
     }

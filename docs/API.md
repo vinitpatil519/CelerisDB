@@ -231,6 +231,57 @@ Pass `next_cursor` as `after` to get the next page. It is `null` on the last pag
 
 Each item is a committed version, but a scan is not a point-in-time snapshot.
 
+### `POST /v1/query`
+
+A scan with a JSON filter and projection, evaluated on the nodes that hold
+the data (D-030). Body:
+
+```json
+{"prefix":"orders/",
+ "where":{"status":"paid","total":{"$gte":100},"customer.tier":{"$in":["gold","platinum"]}},
+ "fields":["total","customer.id"],
+ "limit":100,"max_scanned":10000,"after":null,"consistency":"strict"}
+```
+
+Every field is optional. The range is `prefix`, or `start`/`end`, as for
+`/v1/scan`.
+
+Response:
+
+```json
+{"items":[{"key":"orders/0042","value":{"total":120,"customer":{"id":7}},"version":9,"expires_at_ms":null}],
+ "next_cursor":"orders/0042","scanned":57,"consistency":"strict","partial":false}
+```
+
+* **Paging.** A request reads at most `max_scanned` rows (1–100,000,
+  default 10,000), so a selective filter can return a page with few or no
+  items and a `next_cursor`. Keep passing `next_cursor` as `after` until it
+  is `null`. Pages are in key order and never skip or repeat a key.
+* **Filters.** A filter object ANDs its conditions. `{"field": value}` is
+  equality; `{"field": {"$op": arg, ...}}` applies operators:
+
+  | Operator | Matches when the field |
+  |---|---|
+  | `$eq`, `$ne` | equals / does not equal the value (`$ne` also matches a missing field) |
+  | `$gt`, `$gte`, `$lt`, `$lte` | compares with a number or a string; other types never match |
+  | `$in`, `$nin` | is / is not one of up to 1,000 values |
+  | `$exists` | is present (`true`) or absent (`false`) |
+  | `$prefix` | is a string starting with the argument |
+  | `$contains` | is an array holding the value, or a string containing the substring |
+
+  `$and` and `$or` take arrays of filters; `$not` takes a filter. Field
+  paths are dotted (`customer.tier`); a numeric segment indexes an array
+  (`items.0.sku`). Numbers compare by value, so `1` equals `1.0`. Values
+  that are not JSON objects only match filters on missing fields.
+* **Projection.** `fields` keeps only the listed paths, rebuilt as nested
+  objects. A path that reaches an array or a scalar keeps that whole value.
+* **Limits.** A filter has at most 256 conditions and 16 levels of nesting.
+  Invalid filters fail with `400 invalid_filter`.
+* **Cost.** There are no secondary indexes yet: a query reads the whole
+  range, `max_scanned` rows at a time. Narrow it with `prefix` when you can.
+  In a cluster each replica set filters its own data, so only matches cross
+  the network; `scanned` adds up the rows read by all of them.
+
 ### `GET /v1/mutations/{id}`
 
 * `200 {"status":"committed","version":17}`

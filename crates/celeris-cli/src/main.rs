@@ -142,6 +142,31 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    /// Find keys whose JSON values match a filter (evaluated on the nodes).
+    Query {
+        #[arg(long)]
+        prefix: Option<String>,
+        /// Filter, e.g. '{"status":"paid","total":{"$gte":100}}'.
+        #[arg(long = "where", value_name = "JSON")]
+        filter: Option<String>,
+        /// Comma-separated fields to return, e.g. total,customer.id.
+        #[arg(long, value_delimiter = ',')]
+        fields: Vec<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Rows each request may read (default 10000 on the server).
+        #[arg(long)]
+        max_scanned: Option<usize>,
+        /// Continue after this key (the cursor printed by a previous query).
+        #[arg(long)]
+        after: Option<String>,
+        /// Follow cursors until the whole range is read.
+        #[arg(long)]
+        all: bool,
+        /// strict | session | bounded | available | eventual
+        #[arg(long, short)]
+        consistency: Option<String>,
+    },
     /// Check whether a mutation committed.
     Mutation { id: MutationId },
     /// List or clear conflicts recorded by `available` writes.
@@ -410,6 +435,35 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             after,
             limit,
         } => scan(&client, json, prefix, after, limit),
+        Command::Query {
+            prefix,
+            filter,
+            fields,
+            limit,
+            max_scanned,
+            after,
+            all,
+            consistency,
+        } => {
+            let mut body = serde_json::json!({ "limit": limit });
+            if let Some(p) = prefix {
+                body["prefix"] = p.into();
+            }
+            if let Some(f) = filter {
+                body["where"] = serde_json::from_str(&f)
+                    .map_err(|e| anyhow::anyhow!("--where is not valid JSON: {e}"))?;
+            }
+            if !fields.is_empty() {
+                body["fields"] = fields.into();
+            }
+            if let Some(m) = max_scanned {
+                body["max_scanned"] = m.into();
+            }
+            if let Some(c) = consistency {
+                body["consistency"] = c.into();
+            }
+            query(&client, json, body, after, all)
+        }
         Command::Mutation { id } => {
             let reply = client.get(&format!("/v1/mutations/{id}"))?;
             if json {
@@ -872,6 +926,50 @@ fn scan(
     if let Some(cursor) = reply.body["next_cursor"].as_str() {
         let prefix_flag = prefix.map(|p| format!(" --prefix {p}")).unwrap_or_default();
         eprintln!("-- more: celeris scan{prefix_flag} --after {cursor}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn query(
+    client: &Client,
+    json: bool,
+    mut body: Value,
+    mut after: Option<String>,
+    all: bool,
+) -> anyhow::Result<ExitCode> {
+    let (mut matched, mut scanned) = (0u64, 0u64);
+    loop {
+        if let Some(a) = &after {
+            body["after"] = a.clone().into();
+        }
+        let reply = client.post_read("/v1/query", &body)?;
+        if !reply.is_success() {
+            print_error(&reply);
+            return Ok(ExitCode::FAILURE);
+        }
+        if json {
+            print_json(&reply.body);
+        } else {
+            for item in reply.body["items"].as_array().into_iter().flatten() {
+                println!("{}	{}", str_of(&item["key"]), item["value"]);
+                matched += 1;
+            }
+        }
+        scanned += reply.body["scanned"].as_u64().unwrap_or(0);
+        after = reply.body["next_cursor"].as_str().map(str::to_owned);
+        match &after {
+            Some(cursor) if !all => {
+                if !json {
+                    eprintln!("-- more: add --after {cursor} (or use --all)");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    if !json {
+        eprintln!("-- {matched} matched, {scanned} scanned");
     }
     Ok(ExitCode::SUCCESS)
 }

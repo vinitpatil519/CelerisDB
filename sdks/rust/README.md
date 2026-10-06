@@ -37,6 +37,23 @@ db.batch(
 Values are anything `Serialize` on the way in and `DeserializeOwned` on the
 way out, so typed structs work directly: `db.get::<User>("users/42")`.
 
+## Queries
+
+Filters run on the server, next to the data; only matches come back.
+
+```rust
+use celeris_client::{QueryOptions, ScanOptions};
+
+let paid = db
+    .query_all::<serde_json::Value>(&QueryOptions {
+        range: ScanOptions { prefix: Some("orders/".into()), ..Default::default() },
+        filter: Some(json!({"status": "paid", "total": {"$gte": 100}})),
+        fields: Some(vec!["total".into()]),
+        ..Default::default()
+    })
+    .await?;
+```
+
 ## Guarantees
 
 - **Safe retries.** Every write carries a mutation ID. The client retries

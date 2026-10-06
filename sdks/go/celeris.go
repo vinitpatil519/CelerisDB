@@ -178,6 +178,29 @@ type ScanPage struct {
 	Partial bool
 }
 
+// QueryOptions describes a filtered query, evaluated on the server.
+type QueryOptions struct {
+	// Key range, page size and consistency, as for scans.
+	ScanOptions
+	// Where is a MongoDB-style filter, e.g.
+	// map[string]any{"status": "paid", "total": map[string]any{"$gte": 100}}.
+	// Operators: $eq $ne $gt $gte $lt $lte $in $nin $exists $prefix
+	// $contains, combined with $and, $or and $not.
+	Where map[string]any
+	// Fields returns only these fields (dotted paths).
+	Fields []string
+	// MaxScanned caps the rows each request reads (server default 10000).
+	MaxScanned int
+}
+
+// QueryPage is one page of a query. NextCursor is set while the range is
+// not done, even when the page holds few items.
+type QueryPage struct {
+	ScanPage
+	// Scanned is the number of rows the server read, matching or not.
+	Scanned uint64
+}
+
 // Conflict is a write that lost last-writer-wins under available consistency.
 type Conflict struct {
 	Key               string  `json:"key"`
@@ -466,6 +489,91 @@ func (c *Client) Scan(ctx context.Context, opts *ScanOptions, fn func(Item) bool
 	}
 }
 
+// QueryPage returns one page of a filtered query. Pass the previous page's
+// NextCursor as after.
+func (c *Client) QueryPage(ctx context.Context, opts *QueryOptions, after string) (*QueryPage, error) {
+	if opts == nil {
+		opts = &QueryOptions{}
+	}
+	req := map[string]any{}
+	set := func(k, v string) {
+		if v != "" {
+			req[k] = v
+		}
+	}
+	set("prefix", opts.Prefix)
+	set("start", opts.Start)
+	set("end", opts.End)
+	set("consistency", string(c.mode(opts.Consistency)))
+	set("after", after)
+	if opts.Limit > 0 {
+		req["limit"] = opts.Limit
+	}
+	if opts.MaxScanned > 0 {
+		req["max_scanned"] = opts.MaxScanned
+	}
+	if opts.Where != nil {
+		req["where"] = opts.Where
+	}
+	if len(opts.Fields) > 0 {
+		req["fields"] = opts.Fields
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := c.readBody(ctx, http.MethodPost, "/v1/query", nil, body)
+	if err != nil {
+		return nil, err
+	}
+	if err := raw.ok(); err != nil {
+		return nil, err
+	}
+	var page struct {
+		Items       []json.RawMessage `json:"items"`
+		NextCursor  *string           `json:"next_cursor"`
+		Partial     bool              `json:"partial"`
+		Scanned     uint64            `json:"scanned"`
+		Consistency string            `json:"consistency"`
+	}
+	if err := json.Unmarshal(raw.body, &page); err != nil {
+		return nil, err
+	}
+	out := &QueryPage{ScanPage: ScanPage{Partial: page.Partial}, Scanned: page.Scanned}
+	if page.NextCursor != nil {
+		out.NextCursor = *page.NextCursor
+	}
+	for _, i := range page.Items {
+		item, err := decodeItem(i, page.Consistency)
+		if err != nil {
+			return nil, err
+		}
+		out.Items = append(out.Items, *item)
+	}
+	return out, nil
+}
+
+// Query calls fn for every matching item in key order, fetching pages as
+// needed. Returning false from fn stops the query.
+func (c *Client) Query(ctx context.Context, opts *QueryOptions, fn func(Item) bool) error {
+	after := ""
+	for {
+		page, err := c.QueryPage(ctx, opts, after)
+		if err != nil {
+			return err
+		}
+		for _, item := range page.Items {
+			if !fn(item) {
+				return nil
+			}
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		after = page.NextCursor
+	}
+}
+
 // MutationStatus reports whether a mutation committed (within the server's
 // retention window), and its version.
 func (c *Client) MutationStatus(ctx context.Context, mutationID string) (committed bool, version *uint64, err error) {
@@ -657,11 +765,15 @@ func backoff(ctx context.Context, attempt int, base time.Duration) error {
 
 // read sends idempotent calls, retried on any failure.
 func (c *Client) read(ctx context.Context, method, path string, headers map[string]string) (*rawResponse, error) {
+	return c.readBody(ctx, method, path, headers, nil)
+}
+
+func (c *Client) readBody(ctx context.Context, method, path string, headers map[string]string, body []byte) (*rawResponse, error) {
 	start := c.start()
 	var last error
 	for attempt := 0; attempt < c.attempts; attempt++ {
 		node := (start + attempt) % len(c.nodes)
-		raw, err := c.send(ctx, node, method, path, headers, nil)
+		raw, err := c.send(ctx, node, method, path, headers, body)
 		switch {
 		case err != nil:
 			last = fmt.Errorf("%w: %v", ErrUnreachable, err)

@@ -97,6 +97,26 @@ export interface ScanPage<T = unknown> {
   partial: boolean;
 }
 
+/**
+ * A JSON filter, MongoDB style: `{ status: "paid", total: { $gte: 100 } }`.
+ * Operators: $eq $ne $gt $gte $lt $lte $in $nin $exists $prefix $contains,
+ * combined with $and, $or and $not. Dotted paths reach nested fields.
+ */
+export type Filter = Record<string, unknown>;
+
+export interface QueryOptions extends ScanOptions {
+  where?: Filter;
+  /** Return only these fields (dotted paths). */
+  fields?: string[];
+  /** Rows each request may read on the server (default 10000). */
+  maxScanned?: number;
+}
+
+export interface QueryPage<T = unknown> extends ScanPage<T> {
+  /** Rows the server read for this page, matching or not. */
+  scanned: number;
+}
+
 export interface Conflict {
   key: string;
   value: string | null;
@@ -305,6 +325,43 @@ export class Client {
     }
   }
 
+  /**
+   * One page of a filtered query. A page can hold fewer than `limit` items
+   * and still have a `nextCursor`: the server stops after `maxScanned` rows.
+   */
+  async queryPage<T = unknown>(options: QueryOptions = {}, after?: string): Promise<QueryPage<T>> {
+    const body = JSON.stringify({
+      prefix: options.prefix,
+      start: options.start,
+      end: options.end,
+      limit: options.limit,
+      where: options.where,
+      fields: options.fields,
+      max_scanned: options.maxScanned,
+      consistency: options.consistency ?? this.options.consistency,
+      after,
+    });
+    const raw = await this.read("POST", "/v1/query", {}, body);
+    this.expectOk(raw);
+    return {
+      items: (raw.body.items as any[]).map((i) => toItem<T>({ ...i, consistency: raw.body.consistency })),
+      nextCursor: raw.body.next_cursor ?? null,
+      partial: Boolean(raw.body.partial),
+      scanned: raw.body.scanned ?? 0,
+    };
+  }
+
+  /** Iterates every matching item in key order, fetching pages as needed. */
+  async *query<T = unknown>(options: QueryOptions = {}): AsyncGenerator<Item<T>> {
+    let after: string | undefined;
+    for (;;) {
+      const page: QueryPage<T> = await this.queryPage<T>(options, after);
+      yield* page.items;
+      if (page.nextCursor === null) return;
+      after = page.nextCursor;
+    }
+  }
+
   /** Whether a mutation committed (within the server's retention window). */
   async mutationStatus(mutationId: string): Promise<{ committed: boolean; version: number | null }> {
     const raw = await this.read("GET", `/v1/mutations/${encodeURIComponent(mutationId)}`);
@@ -406,13 +463,18 @@ export class Client {
   }
 
   /** Reads and other idempotent calls: retried on any failure. */
-  private async read(method: string, path: string, headers: Record<string, string> = {}): Promise<Raw> {
+  private async read(
+    method: string,
+    path: string,
+    headers: Record<string, string> = {},
+    body?: string,
+  ): Promise<Raw> {
     const attempts = this.options.attempts ?? 4;
     let last: unknown;
     for (let i = 0; i < attempts; i++) {
       const node = (this.preferred + i) % this.nodes.length;
       try {
-        const raw = await this.send(node, method, path, headers);
+        const raw = await this.send(node, method, path, headers, body);
         const code = raw.body?.error?.code;
         if ((raw.status === 421 && REDIRECTS.has(code)) || (raw.status === 503 && TRANSIENT.has(code))) {
           last = new CelerisError(raw.status, raw.body.error);

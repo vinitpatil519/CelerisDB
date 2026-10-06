@@ -21,6 +21,10 @@ await db.batch([
 ]);
 
 for await (const item of db.scan({ prefix: "orders/" })) console.log(item.key, item.value);
+
+// Filtered on the server; only matches come back
+const paid = { status: "paid", total: { $gte: 100 } };
+for await (const item of db.query({ prefix: "orders/", where: paid, fields: ["total"] })) console.log(item.key, item.value);
 ```
 
 ## Guarantees

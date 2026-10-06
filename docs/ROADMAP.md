@@ -266,3 +266,12 @@ Not done: resumable change streams (from a log position).
 * [x] Criterion micro-benchmarks for the storage engine
   (`cargo bench -p celeris-storage`; numbers in STORAGE_ENGINE.md).
 * [ ] Chaos suite beyond the current crash, failover and partition tests.
+
+## M10 — Queries
+
+* [x] Filtered queries (D-030): `POST /v1/query` with MongoDB-style JSON
+  filters and projection, pushed down to every replica set, bounded by
+  `max_scanned` with gap-free paging. CLI `celeris query`; `query` /
+  `queryPage` in all four SDKs.
+* [ ] Secondary indexes on JSON fields.
+* [ ] Sorting by a field and aggregates (count, sum, min, max).

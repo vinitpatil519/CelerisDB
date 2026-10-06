@@ -23,6 +23,10 @@ db.batch([
 
 for item in db.scan(prefix="orders/"):
     print(item.key, item.value)
+
+# Filtered on the server; only matches come back
+for item in db.query(prefix="orders/", where={"status": "paid", "total": {"$gte": 100}}, fields=["total"]):
+    print(item.key, item.value)
 ```
 
 ## Guarantees

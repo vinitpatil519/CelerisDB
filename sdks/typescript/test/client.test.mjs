@@ -129,6 +129,31 @@ describe("scans", () => {
   });
 });
 
+describe("queries", () => {
+  test("filters and projects on the server", async () => {
+    for (let i = 0; i < 12; i++) {
+      await client.put(`q/${String(i).padStart(2, "0")}`, { n: i, tags: i % 3 === 0 ? ["fizz"] : [] });
+    }
+    const page = await client.queryPage({
+      prefix: "q/",
+      where: { tags: { $contains: "fizz" }, n: { $gt: 0 } },
+      fields: ["n"],
+    });
+    assert.deepEqual(
+      page.items.map((i) => i.value),
+      [{ n: 3 }, { n: 6 }, { n: 9 }],
+    );
+    assert.equal(page.nextCursor, null);
+    assert.equal(page.scanned, 12);
+
+    const all = [];
+    for await (const item of client.query({ prefix: "q/", where: { n: { $lt: 5 } }, maxScanned: 2 })) all.push(item.key);
+    assert.deepEqual(all, ["q/00", "q/01", "q/02", "q/03", "q/04"]);
+
+    await assert.rejects(client.queryPage({ where: { n: { $nope: 1 } } }), { code: "invalid_filter" });
+  });
+});
+
 describe("watch", () => {
   test("streams matching changes", async () => {
     const events = [];

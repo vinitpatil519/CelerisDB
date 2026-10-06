@@ -105,6 +105,25 @@ def test_scan_pages_in_key_order(client):
     assert [i.value for i in client.scan(prefix="scan/", limit=7)] == list(range(25))
 
 
+def test_query_filters_and_projects_on_the_server(client):
+    for i in range(12):
+        client.put(f"q/{i:02}", {"n": i, "tags": ["fizz"] if i % 3 == 0 else []})
+
+    page = client.query_page(
+        prefix="q/", where={"tags": {"$contains": "fizz"}, "n": {"$gt": 0}}, fields=["n"]
+    )
+    assert [i.value for i in page.items] == [{"n": 3}, {"n": 6}, {"n": 9}]
+    assert page.next_cursor is None
+    assert page.scanned == 12
+
+    keys = [i.key for i in client.query(prefix="q/", where={"n": {"$lt": 5}}, max_scanned=2)]
+    assert keys == ["q/00", "q/01", "q/02", "q/03", "q/04"]
+
+    with pytest.raises(CelerisError) as err:
+        client.query_page(where={"n": {"$nope": 1}})
+    assert err.value.code == "invalid_filter"
+
+
 def test_watch_streams_matching_changes(client):
     with client.watch("live/") as watch:
         assert watch.hello["partial"] is False

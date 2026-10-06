@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use celeris_client::{
-    BatchOp, Client, DeleteOptions, Error, MutationStatus, Outcome, PutOptions, ScanOptions,
-    WatchEvent, WriteOptions,
+    BatchOp, Client, DeleteOptions, Error, MutationStatus, Outcome, PutOptions, QueryOptions,
+    ScanOptions, WatchEvent, WriteOptions,
 };
 use celeris_server::config::SyncSetting;
 use celeris_server::{Config, Node, serve};
@@ -230,6 +230,62 @@ async fn scans_page_in_order() {
         all.iter().map(|i| i.value).collect::<Vec<_>>(),
         (0..25).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn queries_filter_and_project_on_the_server() {
+    let node = start().await;
+    let db = Client::new(&node.url).expect("client");
+    for i in 0..12 {
+        let tags = if i % 3 == 0 {
+            json!(["fizz"])
+        } else {
+            json!([])
+        };
+        db.put(&format!("q/{i:02}"), &json!({"n": i, "tags": tags}))
+            .await
+            .expect("put");
+    }
+    let options = QueryOptions {
+        range: ScanOptions {
+            prefix: Some("q/".into()),
+            ..Default::default()
+        },
+        filter: Some(json!({"tags": {"$contains": "fizz"}, "n": {"$gt": 0}})),
+        fields: Some(vec!["n".into()]),
+        ..Default::default()
+    };
+    let page = db.query_page::<Value>(&options, None).await.expect("page");
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|i| i.value.clone())
+            .collect::<Vec<_>>(),
+        vec![json!({"n": 3}), json!({"n": 6}), json!({"n": 9})]
+    );
+    assert_eq!((page.next_cursor, page.scanned), (None, 12));
+
+    let small = QueryOptions {
+        filter: Some(json!({"n": {"$lt": 5}})),
+        fields: None,
+        max_scanned: Some(2),
+        ..options
+    };
+    let all = db.query_all::<Value>(&small).await.expect("query");
+    assert_eq!(
+        all.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(),
+        ["q/00", "q/01", "q/02", "q/03", "q/04"]
+    );
+
+    let bad = QueryOptions {
+        filter: Some(json!({"n": {"$nope": 1}})),
+        ..Default::default()
+    };
+    let err = db
+        .query_page::<Value>(&bad, None)
+        .await
+        .expect_err("bad filter");
+    assert_eq!(err.code(), Some("invalid_filter"));
 }
 
 #[tokio::test]

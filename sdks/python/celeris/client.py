@@ -97,6 +97,12 @@ class ScanPage:
 
 
 @dataclass(frozen=True)
+class QueryPage(ScanPage):
+    #: Rows the server read for this page, matching or not.
+    scanned: int = 0
+
+
+@dataclass(frozen=True)
 class ChangeEvent:
     key: str
     kind: Literal["put", "delete"]
@@ -300,6 +306,64 @@ class Client:
                 return
             after = page.next_cursor
 
+    def query_page(
+        self,
+        *,
+        where: Mapping[str, Any] | None = None,
+        fields: list[str] | None = None,
+        prefix: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int | None = None,
+        max_scanned: int | None = None,
+        consistency: Consistency | None = None,
+        after: str | None = None,
+    ) -> QueryPage:
+        """One page of a filtered query, evaluated on the server.
+
+        ``where`` is a MongoDB-style filter such as
+        ``{"status": "paid", "total": {"$gte": 100}}``. A page can hold
+        fewer than ``limit`` items and still have a ``next_cursor``: the
+        server stops after ``max_scanned`` rows (default 10000).
+        """
+        body = {
+            k: v
+            for k, v in {
+                "where": where,
+                "fields": fields,
+                "prefix": prefix,
+                "start": start,
+                "end": end,
+                "limit": limit,
+                "max_scanned": max_scanned,
+                "consistency": consistency or self._consistency,
+                "after": after,
+            }.items()
+            if v is not None
+        }
+        raw = self._read("POST", "/v1/query", body=json.dumps(body).encode())
+        _expect_ok(raw)
+        applied = raw.body.get("consistency")
+        return QueryPage(
+            items=[_item({**i, "consistency": applied}) for i in raw.body["items"]],
+            next_cursor=raw.body.get("next_cursor"),
+            partial=bool(raw.body.get("partial")),
+            scanned=int(raw.body.get("scanned", 0)),
+        )
+
+    def query(self, **options: Any) -> Iterator[Item]:
+        """Iterates every matching item in key order, fetching pages as needed.
+
+        Takes the keyword arguments of :meth:`query_page` except ``after``.
+        """
+        after = None
+        while True:
+            page = self.query_page(**options, after=after)
+            yield from page.items
+            if page.next_cursor is None:
+                return
+            after = page.next_cursor
+
     # -- mutations, conflicts, status --------------------------------------
 
     def mutation_status(self, mutation_id: str) -> tuple[bool, int | None]:
@@ -377,13 +441,19 @@ class Client:
         if token:
             self._session = token
 
-    def _read(self, method: str, path: str, headers: Mapping[str, str] | None = None) -> _Raw:
+    def _read(
+        self,
+        method: str,
+        path: str,
+        headers: Mapping[str, str] | None = None,
+        body: bytes | None = None,
+    ) -> _Raw:
         """Reads and other idempotent calls: retried on any failure."""
         last: BaseException | None = None
         for i in range(self._attempts):
             node = (self._preferred + i) % len(self._nodes)
             try:
-                raw = self._send(node, method, path, headers or {}, None)
+                raw = self._send(node, method, path, headers or {}, body)
             except OSError as e:
                 last = e
                 _backoff(i, 0.05)

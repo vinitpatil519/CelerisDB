@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use celeris_server::config::SyncSetting;
 use celeris_server::{Config, Node, serve};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -665,6 +665,49 @@ async fn partitions_move_with_their_data_when_placement_changes() {
         assert_eq!(body["items"].as_array().map(Vec::len), Some(40), "{body}");
         assert_eq!(body["partial"], false);
     }
+    // Filtered queries run on every group. A tiny scan budget makes groups
+    // stop at different keys; paging must still return every match once.
+    for i in 0..40 {
+        let doc = format!(r#"{{"n":{i},"even":{}}}"#, i % 2 == 0);
+        put_anywhere(&all, &format!("q{i:02}"), &doc).await;
+    }
+    let mut found = Vec::new();
+    let mut after: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut body = json!({
+            "prefix": "q",
+            "where": {"even": true, "n": {"$gte": 4}},
+            "fields": ["n"],
+            "limit": 3,
+            "max_scanned": 5,
+        });
+        if let Some(a) = &after {
+            body["after"] = json!(a);
+        }
+        let (code, page, _) = request(
+            c.http,
+            "POST",
+            "/v1/query",
+            &[("content-type", "application/json")],
+            &body.to_string(),
+        )
+        .await;
+        assert_eq!(code, 200, "{page}");
+        assert_eq!(page["partial"], false);
+        for item in page["items"].as_array().expect("items") {
+            assert_eq!(item["value"].as_object().map(|o| o.len()), Some(1));
+            found.push(item["key"].as_str().expect("key").to_owned());
+        }
+        pages += 1;
+        assert!(pages < 200, "query paging does not terminate");
+        match page["next_cursor"].as_str() {
+            Some(cursor) => after = Some(cursor.to_owned()),
+            None => break,
+        }
+    }
+    let expected: Vec<String> = (4..40).step_by(2).map(|i| format!("q{i:02}")).collect();
+    assert_eq!(found, expected);
 
     // RF=3 changes every replica set, so every partition migrates into the
     // single three-node group. Writes during the move are retried by the

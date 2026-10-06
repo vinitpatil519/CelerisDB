@@ -30,6 +30,7 @@ TypeScript (plus a React hook), Python, Rust and Go. See
 | 7. SDKs (TypeScript + React, Python, Rust, Go) and WebSocket change streams | done |
 | 8. Docker, compose, Kubernetes, AWS guide, admin console, website, release binaries | done ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) |
 | 9. Hardening: auth, TLS, backup/restore, benchmarks | in progress |
+| 10. Queries: JSON filters pushed down to replica sets | in progress |
 
 ## Quick start
 
@@ -47,6 +48,7 @@ celeris get users/42
 celeris put sessions/abc '"token"' --ttl 30m
 celeris put users/42 '{"name":"V"}' --if-version 1   # compare-and-set
 celeris scan --prefix users/
+celeris query --prefix users/ --where '{"name":{"$prefix":"V"}}'
 celeris status
 celeris doctor
 celeris stop

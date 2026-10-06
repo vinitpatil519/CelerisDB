@@ -15,6 +15,7 @@ pub mod groups;
 mod metrics;
 mod migration;
 pub mod node;
+pub mod query;
 mod raft_log;
 mod replicated;
 pub mod tls;

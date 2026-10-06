@@ -225,6 +225,31 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-030 Filtered queries pushed down to replica sets
+
+* **One endpoint, JSON filters.** `POST /v1/query` takes a range (prefix or
+  start/end), a MongoDB-style filter, an optional projection and a page
+  size. The filter syntax is familiar, fits in JSON bodies, and needs no
+  query language parser.
+* **Evaluated next to the data.** Single-node mode filters inside the node.
+  In a cluster each replica set's replica filters its own partitions and
+  only matching rows cross the network. Strict queries run on group
+  leaders after a read barrier, like strict scans.
+* **Bounded work per request.** A request reads at most `max_scanned`
+  rows. A selective filter over a large range therefore returns short
+  pages with a cursor rather than an unbounded request. The cursor is the
+  last key examined, not the last key returned.
+* **Merging cluster pages without gaps.** Each group stops at its own
+  resume key. The merged page keeps only matches up to the smallest resume
+  key and drops the rest, which the next page finds again. No key is
+  skipped or repeated, at the cost of some re-reading.
+* **Typed comparisons.** Range operators compare numbers with numbers and
+  strings with strings; mixed types never match rather than following an
+  arbitrary cross-type order. `$ne` and `$nin` match missing fields.
+* **Not yet.** Secondary indexes, sorting by a field, and aggregates. A
+  query costs a range scan; indexes need maintenance inside the write path
+  (and in Raft apply) and are a separate decision.
+
 ## D-029 Backups: physical snapshots and logical exports
 
 * **Physical backup, single node.** `GET /v1/admin/backup` streams an engine

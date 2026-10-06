@@ -23,6 +23,7 @@ Global flags:
 | `celeris get <key> [-c mode] [--max-staleness 500ms]` | Read a value |
 | `celeris delete <key> [--if-version N]` | Delete a key |
 | `celeris scan [--prefix p] [--after cursor] [--limit 100]` | List keys in order |
+| `celeris query [--prefix p] [--where JSON] [--fields a,b.c] [--limit N] [--max-scanned N] [--all]` | Keys whose JSON values match a filter, filtered on the nodes. `--all` follows cursors to the end of the range |
 | `celeris mutation <uuid>` | Did this mutation commit? |
 | `celeris conflicts list [--prefix p] [--limit N]` | Writes that lost last-writer-wins in `available` mode |
 | `celeris conflicts clear <key>` | Forget a key's recorded conflicts |

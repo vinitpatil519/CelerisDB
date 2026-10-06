@@ -10,6 +10,8 @@ const PAGE = 50;
 export function Explorer() {
   const { client } = useConnection();
   const [prefix, setPrefix] = useState("");
+  const [filter, setFilter] = useState("");
+  const [scanned, setScanned] = useState<number | null>(null);
   const [consistency, setConsistency] = useState<Consistency>("strict");
   const [items, setItems] = useState<Item[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -22,7 +24,22 @@ export function Explorer() {
     setBusy(true);
     setError(null);
     try {
-      const page = await client.scanPage({ prefix: prefix || undefined, limit: PAGE, consistency }, after);
+      const range = { prefix: prefix || undefined, limit: PAGE, consistency };
+      let page;
+      if (filter.trim()) {
+        let where: Record<string, unknown>;
+        try {
+          where = JSON.parse(filter);
+        } catch (e) {
+          throw new Error(`Filter is not valid JSON: ${describe(e)}`);
+        }
+        const result = await client.queryPage({ ...range, where }, after);
+        setScanned((prev) => (after ? (prev ?? 0) : 0) + result.scanned);
+        page = result;
+      } else {
+        setScanned(null);
+        page = await client.scanPage(range, after);
+      }
       setItems((prev) => (after ? [...prev, ...page.items] : page.items));
       setCursor(page.nextCursor);
       setPartial(page.partial);
@@ -43,7 +60,7 @@ export function Explorer() {
     <section>
       <header className="page-head">
         <h1>Data</h1>
-        <p>Browse keys in order, read and edit JSON values with compare-and-set.</p>
+        <p>Browse or filter keys in order, read and edit JSON values with compare-and-set.</p>
       </header>
       <form
         className="row card"
@@ -59,13 +76,20 @@ export function Explorer() {
           value={prefix}
           onChange={(e) => setPrefix(e.target.value)}
         />
+        <input
+          aria-label="Filter"
+          className="mono grow"
+          placeholder='filter, e.g. {"status":"paid","total":{"$gte":100}}'
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
         <select aria-label="Consistency" value={consistency} onChange={(e) => setConsistency(e.target.value as Consistency)}>
           {MODES.map((m) => (
             <option key={m}>{m}</option>
           ))}
         </select>
         <button type="submit" disabled={busy}>
-          Scan
+          {filter.trim() ? "Query" : "Scan"}
         </button>
         <button type="button" className="secondary" onClick={() => setSelected("new")}>
           New key
@@ -100,6 +124,11 @@ export function Explorer() {
             </tbody>
           </table>
           {items.length === 0 && !busy ? <p className="muted">No keys.</p> : null}
+          {scanned !== null ? (
+            <p className="muted">
+              {items.length} matched, {scanned} rows scanned{cursor ? " so far" : ""}.
+            </p>
+          ) : null}
           {cursor ? (
             <button type="button" className="secondary" disabled={busy} onClick={() => void load(cursor)}>
               Load more

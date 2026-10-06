@@ -705,3 +705,114 @@ async fn real_socket_serve_and_graceful_shutdown_preserve_data_and_identity() {
     assert!(get.contains(r#""value":true"#), "{get}");
     server.abort();
 }
+
+#[tokio::test]
+async fn query_filters_projects_and_pages_by_scan_budget() {
+    let t = test_node();
+    let json_header = [("content-type", "application/json")];
+    for i in 0..30 {
+        let doc = json!({
+            "status": if i % 3 == 0 { "paid" } else { "open" },
+            "total": i * 10,
+            "customer": {"tier": if i < 10 { "gold" } else { "basic" }, "id": i},
+        });
+        let r = call(
+            &t.app,
+            "PUT",
+            &format!("/v1/kv/orders/{i:02}"),
+            &json_header,
+            Some(&doc.to_string()),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    }
+    call(
+        &t.app,
+        "PUT",
+        "/v1/kv/other/1",
+        &json_header,
+        Some(r#"{"status":"paid"}"#),
+    )
+    .await;
+    call(
+        &t.app,
+        "PUT",
+        "/v1/kv/orders/zz",
+        &json_header,
+        Some(r#""not an object""#),
+    )
+    .await;
+
+    let query = |body: Value| {
+        let app = t.app.clone();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/v1/query",
+                &[("content-type", "application/json")],
+                Some(&body.to_string()),
+            )
+            .await
+        }
+    };
+    let r = query(json!({
+        "prefix": "orders/",
+        "where": {"status": "paid", "customer.tier": "gold"},
+        "fields": ["total", "customer.id"],
+    }))
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let keys: Vec<&str> = r.body["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|i| i["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(keys, ["orders/00", "orders/03", "orders/06", "orders/09"]);
+    assert_eq!(
+        r.body["items"][1]["value"],
+        json!({"total": 30, "customer": {"id": 3}})
+    );
+    assert_eq!(r.body["next_cursor"], Value::Null);
+    assert_eq!(r.body["scanned"], 31);
+
+    // A small budget returns short pages with a cursor until the range ends.
+    let mut found = Vec::new();
+    let mut after = Value::Null;
+    loop {
+        let r = query(json!({
+            "prefix": "orders/",
+            "where": {"$or": [{"total": {"$gte": 250}}, {"status": {"$in": ["paid"]}}]},
+            "max_scanned": 4,
+            "after": after,
+        }))
+        .await;
+        assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+        assert!(r.body["scanned"].as_u64().is_some_and(|n| n <= 4));
+        for item in r.body["items"].as_array().expect("items") {
+            found.push(item["key"].as_str().expect("key").to_owned());
+        }
+        if r.body["next_cursor"].is_null() {
+            break;
+        }
+        after = r.body["next_cursor"].clone();
+    }
+    let expected: Vec<String> = (0..30)
+        .filter(|i| i % 3 == 0 || *i >= 25)
+        .map(|i| format!("orders/{i:02}"))
+        .collect();
+    assert_eq!(found, expected);
+
+    for (body, code) in [
+        (json!({"where": {"$where": "1"}}), "invalid_filter"),
+        (json!({"where": {"a": {"$gt": {}}}}), "invalid_filter"),
+        (json!({"fields": ["a..b"]}), "invalid_argument"),
+        (json!({"max_scanned": 0}), "invalid_argument"),
+        (json!({"prefix": "a", "start": "b"}), "invalid_argument"),
+    ] {
+        let r = query(body.clone()).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(r.body["error"]["code"], code, "{body}");
+    }
+}
