@@ -24,6 +24,27 @@ pub struct Config {
     pub storage: StorageConfig,
     pub log: LogConfig,
     pub auth: AuthConfig,
+    /// Secondary indexes on JSON fields (D-031). Every node of a cluster
+    /// should list the same indexes.
+    pub indexes: Vec<IndexConfig>,
+}
+
+/// One secondary index: `field` (a dotted path) of the JSON values of keys
+/// starting with `prefix`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexConfig {
+    pub name: String,
+    #[serde(default)]
+    pub prefix: String,
+    pub field: String,
+}
+
+impl IndexConfig {
+    pub fn spec(&self) -> anyhow::Result<celeris_storage::IndexSpec> {
+        celeris_storage::IndexSpec::new(&self.name, &self.prefix, &self.field)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 /// API authentication. With no tokens, every request is allowed and admin
@@ -323,6 +344,13 @@ impl Config {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         self.listen_addr()?;
+        let mut names = std::collections::HashSet::new();
+        for index in &self.indexes {
+            index.spec()?;
+            if !names.insert(&index.name) {
+                bail!("index `{}` is defined twice", index.name);
+            }
+        }
         crate::auth::Authenticator::new(&self.auth.tokens).map_err(anyhow::Error::msg)?;
         for origin in &self.http.cors_origins {
             if origin != "*" && HeaderValue::from_str(origin).is_err() {
@@ -392,6 +420,8 @@ impl Config {
             block_cache_bytes: usize::try_from(s.block_cache_mb * MIB).unwrap_or(usize::MAX),
             tombstone_retention: Duration::from_secs(s.tombstone_retention_secs),
             mutation_retention: Duration::from_secs(s.mutation_retention_secs),
+            // Invalid definitions are rejected by `validate`.
+            indexes: self.indexes.iter().filter_map(|i| i.spec().ok()).collect(),
             ..Options::default()
         }
     }
@@ -459,6 +489,14 @@ mutation_retention_secs = 86400
 # name = "app"
 # sha256 = "<64 hex characters>"
 # scopes = ["read", "write"]
+
+# Secondary indexes make equality filters in `POST /v1/query` read only
+# matching keys. Each indexes one field of the JSON values under a prefix.
+# A new index is built in the background; a removed one is deleted.
+# [[indexes]]
+# name = "orders_by_status"
+# prefix = "orders/"
+# field = "status"
 
 [log]
 level = "info"     # [CELERIS_LOG_LEVEL] (RUST_LOG also works)

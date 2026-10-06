@@ -939,6 +939,7 @@ pub async fn serve_with_tls(
             cluster_stopped,
         )))
     });
+    let mut indexing = AbortOnDrop(tokio::spawn(crate::indexing::run(Arc::clone(&node))));
     let signal = async move {
         tokio::select! {
             () = external => {}
@@ -960,6 +961,10 @@ pub async fn serve_with_tls(
     if let Some(mut gossip) = gossip {
         let _ = (&mut gossip.0).await;
     }
+    // The index task holds the node; it must be gone before the engine
+    // closes, or the data directory would stay locked.
+    indexing.0.abort();
+    let _ = (&mut indexing.0).await;
     // Closing the engine joins its background thread and syncs the WAL.
     tokio::task::spawn_blocking(move || drop(node))
         .await

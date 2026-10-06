@@ -11,7 +11,7 @@
 //! Lock order: `writer` → `maintenance` → `version`. Maintenance never takes
 //! `writer`, so an inline flush from a stalled writer cannot deadlock.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
@@ -33,6 +33,9 @@ use crate::clock::{Clock, SystemClock};
 use crate::entry::{Entry, EntryKind};
 use crate::error::{Result, StorageError, corruption, io_err};
 use crate::fsutil::{self, DataFile};
+use crate::index::{
+    INDEX_META_PREFIX, IndexSpec, IndexState, IndexStatus, IndexStep, physical_prefix,
+};
 use crate::iter::{EntryIter, MemIter, MergeIter, as_slice_bound, bounds_empty};
 use crate::manifest::{self, Manifest, TableMeta};
 use crate::memtable::{MemSlot, Memtable};
@@ -80,6 +83,9 @@ pub struct Options {
     /// Run flush and compaction on a background thread. When false they
     /// run only on explicit calls or when writers stall.
     pub background_work: bool,
+    /// Secondary indexes on JSON fields (D-031). Writes maintain them;
+    /// [`Engine::index_step_at`] builds new ones and drops removed ones.
+    pub indexes: Vec<IndexSpec>,
 }
 
 impl Default for Options {
@@ -96,6 +102,7 @@ impl Default for Options {
             tombstone_retention: Duration::from_secs(24 * 60 * 60),
             mutation_retention: Duration::from_secs(24 * 60 * 60),
             background_work: true,
+            indexes: Vec::new(),
         }
     }
 }
@@ -136,6 +143,11 @@ impl Options {
         check(
             !self.mutation_retention.is_zero(),
             "mutation_retention must be positive",
+        )?;
+        let names: HashSet<&str> = self.indexes.iter().map(|i| i.name.as_str()).collect();
+        check(
+            names.len() == self.indexes.len(),
+            "index names must be unique",
         )
     }
 }
@@ -684,6 +696,247 @@ impl Engine {
         Ok(out)
     }
 
+    /// Configured secondary indexes.
+    pub fn index_specs(&self) -> &[IndexSpec] {
+        &self.inner.opts.indexes
+    }
+
+    /// Stored index states by index name.
+    fn index_states(&self) -> Result<BTreeMap<String, IndexState>> {
+        let mut out = BTreeMap::new();
+        for (name, value) in self.meta(INDEX_META_PREFIX)? {
+            let Some(state) = IndexState::decode(&value) else {
+                warn!(name = %String::from_utf8_lossy(&name), "ignoring unreadable index state");
+                continue;
+            };
+            let name = String::from_utf8_lossy(&name[INDEX_META_PREFIX.len()..]).into_owned();
+            out.insert(name, state);
+        }
+        Ok(out)
+    }
+
+    /// Every configured index (`building` or `ready`) and every stored one
+    /// whose old entries are still being deleted (`dropping`).
+    pub fn indexes(&self) -> Result<Vec<IndexStatus>> {
+        let stored = self.index_states()?;
+        let mut out = Vec::new();
+        for spec in &self.inner.opts.indexes {
+            let ready = matches!(
+                stored.get(&spec.name),
+                Some(IndexState::Ready { fingerprint }) if *fingerprint == spec.fingerprint()
+            );
+            out.push(IndexStatus {
+                name: spec.name.clone(),
+                state: if ready { "ready" } else { "building" },
+            });
+        }
+        for (name, state) in &stored {
+            if self.is_dropping(name, state) {
+                out.push(IndexStatus {
+                    name: name.clone(),
+                    state: "dropping",
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    fn is_dropping(&self, name: &str, state: &IndexState) -> bool {
+        matches!(state, IndexState::Dropping { .. })
+            || !self
+                .inner
+                .opts
+                .indexes
+                .iter()
+                .any(|s| s.name == name && s.fingerprint() == state.fingerprint())
+    }
+
+    /// Whether [`Engine::index_step_at`] has work left.
+    pub fn index_work_pending(&self) -> Result<bool> {
+        Ok(self.indexes()?.iter().any(|s| s.state != "ready"))
+    }
+
+    /// One step of index maintenance, committed as one version: deletes up
+    /// to `limit` entries of a dropped index, or else indexes up to `limit`
+    /// keys of an index being built. With nothing to do it still commits a
+    /// version, so replicas applying the same step stay at equal versions
+    /// even if their index configurations differ.
+    pub fn index_step_at(&self, now_ms: u64, limit: usize) -> Result<IndexStep> {
+        let limit = limit.max(1);
+        let inner = &self.inner;
+        let mut w = inner.writer.lock();
+        w.check()?;
+        inner.drain(&mut w)?;
+        inner.make_room()?;
+        let seq = w.next_seq;
+        let id = MutationId::from_u128(0);
+        let entry = |key: Vec<u8>, value: Option<Vec<u8>>, expires_at_ms: Option<u64>| Entry {
+            key,
+            seq,
+            kind: if value.is_some() {
+                EntryKind::Put
+            } else {
+                EntryKind::Delete
+            },
+            timestamp_ms: now_ms,
+            expires_at_ms,
+            mutation_id: id,
+            value: value.unwrap_or_default(),
+        };
+        let stored = self.index_states()?;
+        let mut entries = Vec::new();
+        let mut worked = false;
+
+        // Drop first, so a redefined index is rebuilt from a clean slate.
+        if let Some((name, state)) = stored.iter().find(|(n, s)| self.is_dropping(n, s)) {
+            let prefix = physical_prefix(name, state.fingerprint());
+            let start = match state {
+                IndexState::Dropping {
+                    after: Some(after), ..
+                } => Bound::Excluded(after.clone()),
+                _ => Bound::Included(prefix.clone()),
+            };
+            let end = prefix_successor(&prefix).map_or(Bound::Unbounded, Bound::Excluded);
+            let mut last = None;
+            let mut n = 0;
+            for e in inner.raw_entries(start, end) {
+                let e = e?;
+                n += 1;
+                if e.kind == EntryKind::Put {
+                    entries.push(entry(e.key.clone(), None, None));
+                }
+                last = Some(e.key);
+                if n >= limit {
+                    break;
+                }
+            }
+            let next = (n >= limit).then(|| IndexState::Dropping {
+                fingerprint: state.fingerprint().to_owned(),
+                after: last,
+            });
+            entries.push(entry(
+                meta_key(&index_meta_name(name)),
+                next.map(|s| s.encode()),
+                None,
+            ));
+            worked = true;
+        }
+
+        if !worked {
+            for spec in &inner.opts.indexes {
+                let after = match stored.get(&spec.name) {
+                    None => None,
+                    Some(IndexState::Building { fingerprint, after })
+                        if *fingerprint == spec.fingerprint() =>
+                    {
+                        after.clone()
+                    }
+                    Some(_) => continue,
+                };
+                let start = match after {
+                    Some(after) => Bound::Excluded(after),
+                    None if spec.prefix.is_empty() => {
+                        Bound::Included(vec![RESERVED_KEY_PREFIX + 1])
+                    }
+                    None => Bound::Included(spec.prefix.clone()),
+                };
+                let end = prefix_successor(&spec.prefix).map_or(Bound::Unbounded, Bound::Excluded);
+                let mut last = None;
+                let mut n = 0;
+                for e in inner.raw_entries(start, end) {
+                    let e = e?;
+                    n += 1;
+                    if e.is_live_at(now_ms)
+                        && let Some(k) = spec.entry_key(&e.key, &e.value)
+                    {
+                        entries.push(entry(k, Some(Vec::new()), e.expires_at_ms));
+                    }
+                    last = Some(e.key);
+                    if n >= limit {
+                        break;
+                    }
+                }
+                let fingerprint = spec.fingerprint();
+                let state = if n >= limit {
+                    IndexState::Building {
+                        fingerprint,
+                        after: last,
+                    }
+                } else {
+                    IndexState::Ready { fingerprint }
+                };
+                entries.push(entry(
+                    meta_key(&index_meta_name(&spec.name)),
+                    Some(state.encode()),
+                    None,
+                ));
+                worked = true;
+                break;
+            }
+        }
+
+        if !worked {
+            entries.push(entry(
+                meta_key(INDEX_TICK_META),
+                Some(now_ms.to_le_bytes().to_vec()),
+                None,
+            ));
+        }
+        let payload = wal::encode_batch(&entries);
+        inner.append_direct(&mut w, &payload, entries, 0)?;
+        Ok(IndexStep {
+            version: seq,
+            worked,
+        })
+    }
+
+    /// Keys within `(lo, hi)` whose value for index `name` equals `value`,
+    /// in key order, at most `limit`. `None` when the index is not ready
+    /// (or unknown), or `value` is an array or object, which are never
+    /// indexed: the caller must scan instead.
+    pub fn index_lookup(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+        lo: Bound<&[u8]>,
+        hi: Bound<&[u8]>,
+        limit: usize,
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        let Some(spec) = self.inner.opts.indexes.iter().find(|s| s.name == name) else {
+            return Ok(None);
+        };
+        let ready = matches!(
+            self.index_states()?.get(name),
+            Some(IndexState::Ready { fingerprint }) if *fingerprint == spec.fingerprint()
+        );
+        let Some(prefix) = spec.value_prefix(value).filter(|_| ready) else {
+            return Ok(None);
+        };
+        let join = |k: &[u8]| [prefix.as_slice(), k].concat();
+        let start = match lo {
+            Bound::Included(k) => Bound::Included(join(k)),
+            Bound::Excluded(k) => Bound::Excluded(join(k)),
+            Bound::Unbounded => Bound::Included(prefix.clone()),
+        };
+        let end = match hi {
+            Bound::Included(k) => Bound::Included(join(k)),
+            Bound::Excluded(k) => Bound::Excluded(join(k)),
+            Bound::Unbounded => prefix_successor(&prefix).map_or(Bound::Unbounded, Bound::Excluded),
+        };
+        let now = self.inner.clock.now_ms();
+        let mut out = Vec::new();
+        for e in self.inner.raw_entries(start, end) {
+            let e = e?;
+            if e.is_live_at(now) {
+                out.push(e.key[prefix.len()..].to_vec());
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+
     /// Puts one key with a fresh random mutation ID.
     pub fn put(&self, key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Result<WriteOutcome> {
         self.write(WriteBatch::new(MutationId::random()).put(key, value))
@@ -958,6 +1211,34 @@ fn meta_key(name: &[u8]) -> Vec<u8> {
     key.extend_from_slice(name);
     key
 }
+
+/// An index entry derived from user entry `e`: same commit, same expiry.
+fn index_entry(key: Vec<u8>, e: &Entry, kind: EntryKind) -> Entry {
+    Entry {
+        key,
+        seq: e.seq,
+        kind,
+        timestamp_ms: e.timestamp_ms,
+        expires_at_ms: if kind == EntryKind::Put {
+            e.expires_at_ms
+        } else {
+            None
+        },
+        mutation_id: e.mutation_id,
+        value: Vec::new(),
+    }
+}
+
+/// Metadata name of an index's state.
+fn index_meta_name(name: &str) -> Vec<u8> {
+    let mut out = INDEX_META_PREFIX.to_vec();
+    out.extend_from_slice(name.as_bytes());
+    out
+}
+
+/// Metadata name written by an index step with nothing to do, so every
+/// step commits exactly one version.
+const INDEX_TICK_META: &[u8] = b"index-tick";
 
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -1350,6 +1631,8 @@ impl Inner {
                 value: Vec::new(),
             }));
         }
+        let derived = self.index_entries(&w, &self.current(), &entries)?;
+        entries.extend(derived);
         let payload = wal::encode_batch(&entries);
         if group {
             if let Err(e) = w.wal.append_unsynced(&payload) {
@@ -1376,7 +1659,25 @@ impl Inner {
                 deduplicated: false,
             });
         }
-        match w.wal.append(&payload) {
+        self.append_direct(&mut w, &payload, entries, batch.ops().len())?;
+        Ok(WriteOutcome {
+            version: seq,
+            deduplicated: false,
+        })
+    }
+
+    /// Appends one batch at `w.next_seq` to the WAL (fsynced per the sync
+    /// mode) and publishes it. Caller holds `writer` with group commit
+    /// drained.
+    fn append_direct(
+        &self,
+        w: &mut WriterState,
+        payload: &[u8],
+        entries: Vec<Entry>,
+        ops: usize,
+    ) -> Result<()> {
+        let seq = w.next_seq;
+        match w.wal.append(payload) {
             Ok(n) => {
                 add(&self.metrics.wal_bytes, n as u64);
                 if self.opts.sync == SyncMode::Always {
@@ -1403,20 +1704,63 @@ impl Inner {
         };
         self.last_seq.store(seq, Ordering::Release);
         inc(&self.metrics.write_batches);
-        add(&self.metrics.write_ops, batch.ops().len() as u64);
+        add(&self.metrics.write_ops, ops as u64);
 
         if mem_bytes >= self.opts.memtable_size_bytes {
             // The batch is already durable; a rotation failure only delays
             // the flush and is retried on the next write.
-            match self.rotate(&mut w) {
+            match self.rotate(w) {
                 Ok(()) => self.schedule_flush(),
                 Err(e) => warn!(error = %e, "memtable rotation failed; will retry"),
             }
         }
-        Ok(WriteOutcome {
-            version: seq,
-            deduplicated: false,
-        })
+        Ok(())
+    }
+
+    /// Index entries for a batch: for each written user key under an
+    /// index's prefix, deletes the entry of its previous value and puts the
+    /// entry of its new one. Earlier writes of the same batch count as the
+    /// previous value.
+    fn index_entries(&self, w: &WriterState, v: &Version, entries: &[Entry]) -> Result<Vec<Entry>> {
+        if self.opts.indexes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut current: HashMap<&[u8], Option<&[u8]>> = HashMap::new();
+        let mut out: BTreeMap<Vec<u8>, Entry> = BTreeMap::new();
+        for e in entries {
+            let specs: Vec<&IndexSpec> = self
+                .opts
+                .indexes
+                .iter()
+                .filter(|s| s.covers(&e.key))
+                .collect();
+            if specs.is_empty() {
+                continue;
+            }
+            let stored;
+            let previous: Option<&[u8]> = match current.get(e.key.as_slice()) {
+                Some(p) => *p,
+                None => {
+                    stored = self
+                        .writer_entry(w, v, &e.key)?
+                        .filter(|old| old.kind == EntryKind::Put);
+                    stored.as_ref().map(|old| old.value.as_slice())
+                }
+            };
+            let new = (e.kind == EntryKind::Put).then_some(e.value.as_slice());
+            for spec in specs {
+                let old_key = previous.and_then(|p| spec.entry_key(&e.key, p));
+                let new_key = new.and_then(|n| spec.entry_key(&e.key, n));
+                if let Some(k) = old_key.filter(|k| Some(k) != new_key.as_ref()) {
+                    out.insert(k.clone(), index_entry(k, e, EntryKind::Delete));
+                }
+                if let Some(k) = new_key {
+                    out.insert(k.clone(), index_entry(k, e, EntryKind::Put));
+                }
+            }
+            current.insert(&e.key, new);
+        }
+        Ok(out.into_values().collect())
     }
 
     fn build_entries(

@@ -816,3 +816,101 @@ async fn query_filters_projects_and_pages_by_scan_budget() {
         assert_eq!(r.body["error"]["code"], code, "{body}");
     }
 }
+
+#[tokio::test]
+async fn equality_queries_use_a_ready_secondary_index() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let options = Options {
+        sync: SyncMode::Never,
+        background_work: false,
+        indexes: vec![
+            celeris_storage::IndexSpec::new("by_status", "orders/", "status").expect("spec"),
+        ],
+        ..Options::default()
+    };
+    let engine = Engine::open(dir.path(), options).expect("engine");
+    let node = Arc::new(Node::new(
+        engine,
+        NodeId::new("node-index").expect("node id"),
+        "127.0.0.1:0".into(),
+        Vec::new(),
+    ));
+    let app = api::router(Arc::clone(&node));
+    let json_header = [("content-type", "application/json")];
+    for i in 0..40 {
+        let status = ["paid", "open", "void", "open"][i % 4];
+        let doc = json!({"status": status, "total": i});
+        let r = call(
+            &app,
+            "PUT",
+            &format!("/v1/kv/orders/{i:02}"),
+            &json_header,
+            Some(&doc.to_string()),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::OK);
+    }
+    let query = |body: Value| {
+        let app = app.clone();
+        async move {
+            call(
+                &app,
+                "POST",
+                "/v1/query",
+                &[("content-type", "application/json")],
+                Some(&body.to_string()),
+            )
+            .await
+        }
+    };
+    let paid = json!({"prefix": "orders/", "where": {"status": "paid", "total": {"$gte": 10}}});
+
+    // Still building: the query scans.
+    let r = query(paid.clone()).await;
+    assert_eq!(r.body["index"], Value::Null);
+    let scanned_keys: Vec<Value> = r.body["items"].as_array().expect("items").clone();
+
+    let status = call(&app, "GET", "/v1/status", &[], None).await;
+    assert_eq!(status.body["indexes"][0]["state"], "building");
+    node.blocking(|e| while e.index_step_at(0, 7).expect("step").worked {})
+        .await
+        .expect("steps");
+    let status = call(&app, "GET", "/v1/status", &[], None).await;
+    assert_eq!(status.body["indexes"][0]["state"], "ready");
+
+    let r = query(paid.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["index"], "by_status");
+    assert_eq!(r.body["items"].as_array(), Some(&scanned_keys));
+    assert_eq!(r.body["scanned"], 10, "only the paid keys are read");
+
+    // Paging through the index never skips a key.
+    let mut found = Vec::new();
+    let mut after = Value::Null;
+    loop {
+        let r = query(json!({
+            "prefix": "orders/", "where": {"status": "open"}, "max_scanned": 3, "after": after,
+        }))
+        .await;
+        assert_eq!(r.body["index"], "by_status");
+        for item in r.body["items"].as_array().expect("items") {
+            found.push(item["key"].as_str().expect("key").to_owned());
+        }
+        if r.body["next_cursor"].is_null() {
+            break;
+        }
+        after = r.body["next_cursor"].clone();
+    }
+    let expected: Vec<String> = (0..40)
+        .filter(|i| i % 2 == 1)
+        .map(|i| format!("orders/{i:02}"))
+        .collect();
+    assert_eq!(found, expected);
+
+    // Not indexable: a range condition, or a range wider than the prefix.
+    let r = query(json!({"prefix": "orders/", "where": {"total": {"$gt": 1}}})).await;
+    assert_eq!(r.body["index"], Value::Null);
+    let r = query(json!({"where": {"status": "paid"}})).await;
+    assert_eq!(r.body["index"], Value::Null);
+    assert_eq!(r.body["items"].as_array().map(Vec::len), Some(10));
+}

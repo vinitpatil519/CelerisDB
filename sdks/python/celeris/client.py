@@ -100,6 +100,8 @@ class ScanPage:
 class QueryPage(ScanPage):
     #: Rows the server read for this page, matching or not.
     scanned: int = 0
+    #: The secondary index that served the page, or ``None`` for a scan.
+    index: str | None = None
 
 
 @dataclass(frozen=True)
@@ -349,6 +351,7 @@ class Client:
             next_cursor=raw.body.get("next_cursor"),
             partial=bool(raw.body.get("partial")),
             scanned=int(raw.body.get("scanned", 0)),
+            index=raw.body.get("index"),
         )
 
     def query(self, **options: Any) -> Iterator[Item]:

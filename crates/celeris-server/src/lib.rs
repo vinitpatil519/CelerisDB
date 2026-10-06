@@ -12,6 +12,7 @@ pub mod config;
 mod error;
 pub mod events;
 pub mod groups;
+mod indexing;
 mod metrics;
 mod migration;
 pub mod node;

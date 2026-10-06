@@ -199,6 +199,8 @@ type QueryPage struct {
 	ScanPage
 	// Scanned is the number of rows the server read, matching or not.
 	Scanned uint64
+	// Index is the secondary index that served the page ("" for a scan).
+	Index string
 }
 
 // Conflict is a write that lost last-writer-wins under available consistency.
@@ -534,12 +536,16 @@ func (c *Client) QueryPage(ctx context.Context, opts *QueryOptions, after string
 		NextCursor  *string           `json:"next_cursor"`
 		Partial     bool              `json:"partial"`
 		Scanned     uint64            `json:"scanned"`
+		Index       *string           `json:"index"`
 		Consistency string            `json:"consistency"`
 	}
 	if err := json.Unmarshal(raw.body, &page); err != nil {
 		return nil, err
 	}
 	out := &QueryPage{ScanPage: ScanPage{Partial: page.Partial}, Scanned: page.Scanned}
+	if page.Index != nil {
+		out.Index = *page.Index
+	}
 	if page.NextCursor != nil {
 		out.NextCursor = *page.NextCursor
 	}

@@ -920,6 +920,8 @@ struct QueryResponse {
     next_cursor: Option<String>,
     /// Rows read to answer this page, matching or not.
     scanned: usize,
+    /// The secondary index that served the page, or `null` for a scan.
+    index: Option<String>,
     consistency: &'static str,
     partial: bool,
 }
@@ -1009,6 +1011,7 @@ async fn query(
             .resume
             .map(|k| String::from_utf8_lossy(&k).into_owned()),
         scanned: page.scanned,
+        index: page.index,
         consistency: mode.as_str(),
         partial,
     })
@@ -1171,6 +1174,26 @@ async fn mutation_status(
     })
 }
 
+/// Secondary indexes and their states (D-031): of the node's engine, or of
+/// every local replication group in cluster mode.
+async fn index_view(node: &Arc<Node>) -> Vec<Value> {
+    let entry = |group: Option<&str>, s: celeris_storage::IndexStatus| json!({ "name": s.name, "state": s.state, "group": group });
+    if !node.is_replicated() {
+        return match node.blocking(|e| e.indexes()).await {
+            Ok(Ok(list)) => list.into_iter().map(|s| entry(None, s)).collect(),
+            _ => Vec::new(),
+        };
+    }
+    let mut out = Vec::new();
+    for group in node.groups() {
+        let engine = group.engine();
+        if let Ok(Ok(list)) = tokio::task::spawn_blocking(move || engine.indexes()).await {
+            out.extend(list.into_iter().map(|s| entry(Some(group.id()), s)));
+        }
+    }
+    out
+}
+
 async fn status(State(node): State<AppState>) -> Result<Json<Value>, ApiError> {
     let (stats, recovery) = node
         .blocking(|e| (e.stats(), e.recovery_report().clone()))
@@ -1181,8 +1204,10 @@ async fn status(State(node): State<AppState>) -> Result<Json<Value>, ApiError> {
     } else {
         "healthy"
     };
+    let indexes = index_view(&node).await;
     Ok(Json(json!({
         "node_id": node.id(),
+        "indexes": indexes,
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": node.uptime().as_secs(),
         "health": health,

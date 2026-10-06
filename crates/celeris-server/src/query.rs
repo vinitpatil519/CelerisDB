@@ -296,8 +296,10 @@ pub struct FilteredScan {
     /// The last key examined, when the scan stopped before the end of the
     /// range (page full or budget spent). The next page starts after it.
     pub resume: Option<Vec<u8>>,
-    /// Rows read, matching or not.
+    /// Rows read, matching or not (index entries, when an index was used).
     pub scanned: usize,
+    /// The secondary index that served the query, if any.
+    pub index: Option<String>,
 }
 
 /// Up to `limit` records with keys in `(lo, hi)` that pass `accept` and the
@@ -313,6 +315,22 @@ pub fn filtered_scan(
     max_scanned: usize,
     accept: impl Fn(&Record) -> bool,
 ) -> celeris_storage::Result<FilteredScan> {
+    if let Some(f) = filter {
+        for (name, value) in index_candidates(engine, f, &lo, &hi) {
+            let found = indexed_scan(
+                engine,
+                &name,
+                &value,
+                (lo.clone(), hi.clone()),
+                f,
+                (limit, max_scanned),
+                &accept,
+            )?;
+            if let Some(found) = found {
+                return Ok(found);
+            }
+        }
+    }
     let mut out = FilteredScan::default();
     loop {
         let want = SCAN_CHUNK.min(max_scanned - out.scanned).max(1);
@@ -346,6 +364,113 @@ pub fn filtered_scan(
     }
 }
 
+/// Equality conditions of the filter's top level that a configured index
+/// covers for the whole range: `(index name, value)`.
+fn index_candidates(
+    engine: &Engine,
+    filter: &Filter,
+    lo: &Bound<Vec<u8>>,
+    hi: &Bound<Vec<u8>>,
+) -> Vec<(String, Value)> {
+    let conditions: Vec<&Filter> = match filter {
+        Filter::And(all) => all.iter().collect(),
+        other => vec![other],
+    };
+    let mut out = Vec::new();
+    for c in conditions {
+        let Filter::Field {
+            path,
+            op: Op::Eq(value),
+        } = c
+        else {
+            continue;
+        };
+        for spec in engine.index_specs() {
+            if spec.field == *path && range_within(lo, hi, &spec.prefix) {
+                out.push((spec.name.clone(), value.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Whether every key in `(lo, hi)` starts with `prefix`.
+fn range_within(lo: &Bound<Vec<u8>>, hi: &Bound<Vec<u8>>, prefix: &[u8]) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    let lo_ok = match lo {
+        Bound::Included(k) | Bound::Excluded(k) => k.as_slice() >= prefix,
+        Bound::Unbounded => false,
+    };
+    let hi_ok = match (hi, celeris_storage::prefix_successor(prefix)) {
+        (Bound::Included(k), Some(end)) => k.as_slice() < end.as_slice(),
+        (Bound::Excluded(k), Some(end)) => k.as_slice() <= end.as_slice(),
+        (_, None) => true,
+        (Bound::Unbounded, Some(_)) => false,
+    };
+    lo_ok && hi_ok
+}
+
+/// Like the scan in [`filtered_scan`], but walks the keys an index lists
+/// for `value`, in key order, re-reading and re-checking each record.
+/// `None` when the index cannot serve (not ready, or a non-scalar value).
+fn indexed_scan(
+    engine: &Engine,
+    name: &str,
+    value: &Value,
+    (mut lo, hi): (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    filter: &Filter,
+    (limit, max_scanned): (usize, usize),
+    accept: &impl Fn(&Record) -> bool,
+) -> celeris_storage::Result<Option<FilteredScan>> {
+    let mut out = FilteredScan {
+        index: Some(name.to_owned()),
+        ..FilteredScan::default()
+    };
+    loop {
+        let want = SCAN_CHUNK.min(max_scanned - out.scanned).max(1);
+        let Some(keys) = engine.index_lookup(
+            name,
+            value,
+            lo.as_ref().map(Vec::as_slice),
+            hi.as_ref().map(Vec::as_slice),
+            want,
+        )?
+        else {
+            if out.scanned == 0 {
+                return Ok(None);
+            }
+            // Reconfigured meanwhile: stop; the next page scans instead.
+            out.resume = match lo {
+                Bound::Excluded(k) => Some(k),
+                _ => None,
+            };
+            return Ok(Some(out));
+        };
+        let exhausted = keys.len() < want;
+        let count = keys.len();
+        for (i, key) in keys.into_iter().enumerate() {
+            out.scanned += 1;
+            if let Some(r) = engine.get(&key)?
+                && accept(&r)
+                && serde_json::from_slice::<Value>(&r.value).is_ok_and(|v| filter.matches(&v))
+            {
+                out.records.push(r);
+            }
+            if out.records.len() >= limit || out.scanned >= max_scanned {
+                let range_done = exhausted && i + 1 == count;
+                out.resume = (!range_done).then_some(key);
+                return Ok(Some(out));
+            }
+            lo = Bound::Excluded(key);
+        }
+        if exhausted {
+            return Ok(Some(out));
+        }
+    }
+}
+
 /// Merges the parts of one query answered by several replication groups.
 ///
 /// Each part covers the range only up to its `resume` key, so the merged
@@ -354,6 +479,7 @@ pub fn filtered_scan(
 pub fn merge_parts(parts: Vec<FilteredScan>, limit: usize) -> FilteredScan {
     let cutoff = parts.iter().filter_map(|p| p.resume.clone()).min();
     let scanned = parts.iter().map(|p| p.scanned).sum();
+    let index = parts.iter().find_map(|p| p.index.clone());
     let mut records: Vec<Record> = parts
         .into_iter()
         .flat_map(|p| p.records)
@@ -370,6 +496,7 @@ pub fn merge_parts(parts: Vec<FilteredScan>, limit: usize) -> FilteredScan {
         records,
         resume,
         scanned,
+        index,
     }
 }
 
@@ -471,11 +598,13 @@ mod tests {
             records: vec![rec("k1"), rec("k4")],
             resume: Some(b"k5".to_vec()),
             scanned: 10,
+            index: None,
         };
         let b = FilteredScan {
             records: vec![rec("k2"), rec("k7")],
             resume: None,
             scanned: 3,
+            index: None,
         };
         let page = merge_parts(vec![a, b], 10);
         let keys: Vec<_> = page.records.iter().map(|r| r.key.clone()).collect();
@@ -489,11 +618,13 @@ mod tests {
                     records: vec![rec("a"), rec("c")],
                     resume: None,
                     scanned: 2,
+                    index: None,
                 },
                 FilteredScan {
                     records: vec![rec("b"), rec("d")],
                     resume: None,
                     scanned: 2,
+                    index: None,
                 },
             ],
             3,

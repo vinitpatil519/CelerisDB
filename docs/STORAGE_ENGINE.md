@@ -204,6 +204,29 @@ meanwhile: the version holds `Arc`s to its tables, and a table file is
 deleted only when its last reference drops. `Engine::create_from_snapshot`
 restores it into an empty directory with the original versions.
 
+## Secondary indexes
+
+`Options::indexes` lists `IndexSpec`s (name, key prefix, JSON field path).
+Index entries are reserved keys
+`0x00 'x' <name> 0x00 <definition hash> 0x00 <encoded value> 0x00 <key>`
+with empty values. They are written in the same WAL batch as the data they
+describe:
+
+* In `write`, after building a batch's entries, the engine reads the
+  previous value of every written user key under an index prefix. It uses
+  the writer's view, so unpublished group-commit writes count. It then
+  emits a delete for the old entry and a put for the new one. A put copies
+  the value's expiry, so index entries expire with their data.
+* `index_step_at(now, limit)` backfills or drops up to `limit` keys as one
+  batch, and records progress in the metadata record `index/<name>`
+  (`building` with a cursor, `ready`, or `dropping` with a cursor). Every
+  call commits exactly one version.
+* `index_lookup(name, value, lo, hi, limit)` returns matching keys in key
+  order, or `None` while the index is not ready.
+
+Index entries are internal keys: user scans skip them, and full compaction
+drops their tombstones at once. Snapshots and backups include them.
+
 ## Benchmarks
 
 Criterion micro-benchmarks live in `crates/celeris-storage/benches/engine.rs`:

@@ -225,6 +225,36 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-031 Secondary indexes maintained by the storage engine
+
+* **In the engine, inside the write.** Each index entry is a reserved key
+  `0x00 'x' name 0x00 hash 0x00 value 0x00 key`. Under the writer lock the
+  engine reads each written key's previous value (including unpublished
+  group-commit writes) and adds index deletes and puts to the same WAL
+  batch. The data and its index entries therefore commit atomically, and
+  every write path stays covered without separate hooks: API writes, Raft
+  apply, `available` reconciliation, migration imports and purges.
+* **Local to each replica set.** A group's engine indexes the keys it
+  holds, like Cassandra's local indexes. A query asks every group, which
+  already happens for filtered queries (D-030). Migration needs nothing
+  extra: imported keys are written through the engine, which indexes them.
+* **Equality on scalars, in key order.** Values are encoded canonically
+  (numbers by value), and keys follow the value, so one value's entries
+  come out in key order. Paging and cluster merging stay the same as for
+  scans. Range conditions, `$in` and sorting by field are left for later.
+* **Building and dropping in steps.** A new or redefined index is
+  backfilled in steps of up to 1,000 keys. Each step holds the writer lock
+  only for its chunk and commits exactly one version, even with nothing to
+  do. In a cluster the group leader proposes `IndexStep` through the
+  group's Raft log, so every replica runs the same step at the same
+  position and versions stay identical even if index configurations
+  differ. Removed or redefined indexes are deleted the same way; the
+  definition hash in the key keeps old and new entries apart.
+* **Exact, and verified anyway.** A query re-reads every candidate record
+  and checks the whole filter, so the index only narrows the read.
+* **Mixed versions.** Nodes without index support cannot apply
+  `IndexStep`. Upgrade every node before configuring indexes.
+
 ## D-030 Filtered queries pushed down to replica sets
 
 * **One endpoint, JSON filters.** `POST /v1/query` takes a range (prefix or
@@ -246,9 +276,8 @@ Current limits:
 * **Typed comparisons.** Range operators compare numbers with numbers and
   strings with strings; mixed types never match rather than following an
   arbitrary cross-type order. `$ne` and `$nin` match missing fields.
-* **Not yet.** Secondary indexes, sorting by a field, and aggregates. A
-  query costs a range scan; indexes need maintenance inside the write path
-  (and in Raft apply) and are a separate decision.
+* **Not yet.** Sorting by a field and aggregates. Equality filters can use
+  secondary indexes (D-031).
 
 ## D-029 Backups: physical snapshots and logical exports
 

@@ -305,6 +305,8 @@ pub struct QueryPage<T> {
     pub partial: bool,
     /// Rows the server read for this page, matching or not.
     pub scanned: u64,
+    /// The secondary index that served the page (`None`: a scan).
+    pub index: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -741,6 +743,7 @@ impl Client {
             next_cursor: raw.body["next_cursor"].as_str().map(str::to_owned),
             partial: raw.body["partial"].as_bool().unwrap_or(false),
             scanned: raw.body["scanned"].as_u64().unwrap_or(0),
+            index: raw.body["index"].as_str().map(str::to_owned),
         })
     }
 

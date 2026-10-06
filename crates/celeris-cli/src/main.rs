@@ -938,6 +938,7 @@ fn query(
     all: bool,
 ) -> anyhow::Result<ExitCode> {
     let (mut matched, mut scanned) = (0u64, 0u64);
+    let mut index: Option<String> = None;
     loop {
         if let Some(a) = &after {
             body["after"] = a.clone().into();
@@ -956,6 +957,9 @@ fn query(
             }
         }
         scanned += reply.body["scanned"].as_u64().unwrap_or(0);
+        if let Some(name) = reply.body["index"].as_str() {
+            index = Some(name.to_owned());
+        }
         after = reply.body["next_cursor"].as_str().map(str::to_owned);
         match &after {
             Some(cursor) if !all => {
@@ -969,7 +973,8 @@ fn query(
         }
     }
     if !json {
-        eprintln!("-- {matched} matched, {scanned} scanned");
+        let via = index.map(|i| format!(" via index {i}")).unwrap_or_default();
+        eprintln!("-- {matched} matched, {scanned} scanned{via}");
     }
     Ok(ExitCode::SUCCESS)
 }

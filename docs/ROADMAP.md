@@ -273,5 +273,6 @@ Not done: resumable change streams (from a log position).
   filters and projection, pushed down to every replica set, bounded by
   `max_scanned` with gap-free paging. CLI `celeris query`; `query` /
   `queryPage` in all four SDKs.
-* [ ] Secondary indexes on JSON fields.
+* [x] Secondary indexes on JSON fields (D-031): engine-maintained, built
+  and dropped in replicated steps, used by equality filters.
 * [ ] Sorting by a field and aggregates (count, sum, min, max).

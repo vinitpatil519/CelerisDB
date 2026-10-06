@@ -115,6 +115,8 @@ export interface QueryOptions extends ScanOptions {
 export interface QueryPage<T = unknown> extends ScanPage<T> {
   /** Rows the server read for this page, matching or not. */
   scanned: number;
+  /** The secondary index that served the page, or `null` for a scan. */
+  index: string | null;
 }
 
 export interface Conflict {
@@ -348,6 +350,7 @@ export class Client {
       nextCursor: raw.body.next_cursor ?? null,
       partial: Boolean(raw.body.partial),
       scanned: raw.body.scanned ?? 0,
+      index: raw.body.index ?? null,
     };
   }
 

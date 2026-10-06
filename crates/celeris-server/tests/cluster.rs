@@ -1361,3 +1361,109 @@ async fn the_leader_places_partitions_once_every_voter_is_up() {
         n.task.abort();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secondary_indexes_are_built_through_raft_and_serve_queries() {
+    let _slot = SLOTS.acquire().await.expect("test slots");
+    let voters = ["ia", "ib", "ic"];
+    let config = |seed, id| {
+        let mut config = test_config(seed, Some(id), &voters);
+        config.indexes = vec![celeris_server::config::IndexConfig {
+            name: "by_kind".into(),
+            prefix: "ix/".into(),
+            field: "kind".into(),
+        }];
+        config
+    };
+    let a = start_with(config(None, "ia")).await;
+    let b = start_with(config(Some(a.cluster), "ib")).await;
+    let c = start_with(config(Some(a.cluster), "ic")).await;
+    let all = [a.http, b.http, c.http];
+    let alive = states(&[(&a, "alive"), (&b, "alive"), (&c, "alive")]);
+    for n in all {
+        wait_until("membership converges", async || view(n).await == alive).await;
+    }
+    wait_until("a control leader accepts the rebalance", async || {
+        for n in all {
+            if post(n, "/v1/admin/rebalance", r#"{"replication_factor":2}"#)
+                .await
+                .0
+                == 202
+            {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    for i in 0..30 {
+        let doc = format!(
+            r#"{{"kind":"{}","n":{i}}}"#,
+            if i % 3 == 0 { "a" } else { "b" }
+        );
+        put_anywhere(&all, &format!("ix/{i:02}"), &doc).await;
+    }
+    // Every replica of every group reports the index ready.
+    for n in all {
+        wait_until("indexes are built on every replica", async || {
+            let s = status(n).await;
+            let list = s["indexes"].as_array().cloned().unwrap_or_default();
+            !list.is_empty() && list.iter().all(|i| i["state"] == "ready")
+        })
+        .await;
+    }
+    let expected: Vec<String> = (0..30)
+        .filter(|i| i % 3 == 0)
+        .map(|i| format!("ix/{i:02}"))
+        .collect();
+    for n in all {
+        let mut found = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut body = json!({"prefix": "ix/", "where": {"kind": "a"}, "max_scanned": 4});
+            if let Some(a) = &after {
+                body["after"] = json!(a);
+            }
+            let (code, page, _) = request(
+                n,
+                "POST",
+                "/v1/query",
+                &[("content-type", "application/json")],
+                &body.to_string(),
+            )
+            .await;
+            assert_eq!(code, 200, "{page}");
+            assert_eq!(page["index"], "by_kind", "{page}");
+            for item in page["items"].as_array().expect("items") {
+                found.push(item["key"].as_str().expect("key").to_owned());
+            }
+            match page["next_cursor"].as_str() {
+                Some(cursor) => after = Some(cursor.to_owned()),
+                None => break,
+            }
+        }
+        assert_eq!(found, expected);
+    }
+    // Writes after the build keep the index exact.
+    put_anywhere(&all, "ix/01", r#"{"kind":"a"}"#).await;
+    put_anywhere(&all, "ix/00", r#"{"kind":"b"}"#).await;
+    let (code, page, _) = request(
+        b.http,
+        "POST",
+        "/v1/query",
+        &[("content-type", "application/json")],
+        r#"{"prefix":"ix/","where":{"kind":"a"},"limit":2}"#,
+    )
+    .await;
+    assert_eq!(code, 200, "{page}");
+    let keys: Vec<&str> = page["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|i| i["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(keys, ["ix/01", "ix/03"]);
+    for n in [a, b, c] {
+        n.task.abort();
+    }
+}

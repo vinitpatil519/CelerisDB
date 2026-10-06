@@ -504,6 +504,8 @@ pub(crate) struct WireQueryPart {
     pub records: Vec<WireRecord>,
     pub resume: Option<String>,
     pub scanned: usize,
+    #[serde(default)]
+    pub index: Option<String>,
 }
 
 impl WireQueryPart {
@@ -516,6 +518,7 @@ impl WireQueryPart {
                 .collect(),
             resume: self.resume.map(String::into_bytes),
             scanned: self.scanned,
+            index: self.index,
         }
     }
 }
@@ -557,6 +560,7 @@ pub(crate) async fn local_group_query(
             .resume
             .map(|k| String::from_utf8_lossy(&k).into_owned()),
         scanned: part.scanned,
+        index: part.index,
     })
 }
 

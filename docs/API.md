@@ -277,10 +277,38 @@ Response:
   objects. A path that reaches an array or a scalar keeps that whole value.
 * **Limits.** A filter has at most 256 conditions and 16 levels of nesting.
   Invalid filters fail with `400 invalid_filter`.
-* **Cost.** There are no secondary indexes yet: a query reads the whole
-  range, `max_scanned` rows at a time. Narrow it with `prefix` when you can.
-  In a cluster each replica set filters its own data, so only matches cross
-  the network; `scanned` adds up the rows read by all of them.
+* **Cost.** Without an index a query reads the whole range, `max_scanned`
+  rows at a time; narrow it with `prefix` when you can. In a cluster each
+  replica set filters its own data, so only matches cross the network.
+  `scanned` adds up the rows (or index entries) read by all of them.
+* **Indexes.** When a ready secondary index covers a top-level equality
+  condition (`{"status": "paid"}` or `{"status": {"$eq": "paid"}}`) and the
+  query's range lies within the index's prefix, the query reads only the
+  keys the index lists for that value, still in key order, and checks the
+  whole filter against each record. `index` in the response names the index
+  used, or is `null` for a scan. Results are the same either way.
+
+#### Secondary indexes
+
+Declare indexes in `celeris.toml`; every node of a cluster should list the
+same ones (D-031):
+
+```toml
+[[indexes]]
+name = "orders_by_status"   # a-z, 0-9, _ and -
+prefix = "orders/"          # only keys under this prefix ("" for all keys)
+field = "status"            # dotted path into the JSON value
+```
+
+* An index covers string, number, boolean and null values of the field.
+  Arrays and objects are not indexed, and equality on them always scans.
+* A new index is built in the background, 1,000 keys per step, while the
+  node keeps serving; queries scan until it is `ready`. Removing or
+  changing an index deletes its old entries the same way.
+* `GET /v1/status` lists each index and its state (`building`, `ready`,
+  `dropping`), per replication group in a cluster.
+* Writes keep indexes exact: the engine updates entries in the same
+  atomic commit as the data.
 
 ### `GET /v1/mutations/{id}`
 

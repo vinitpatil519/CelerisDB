@@ -188,6 +188,10 @@ pub enum DataCommand {
     /// applies, so all digests describe the same log position and can be
     /// compared.
     Digest { id: String, now_ms: u64 },
+    /// One step of secondary-index maintenance (D-031): every replica
+    /// builds or drops the same keys at the same log position, committing
+    /// one engine version.
+    IndexStep { now_ms: u64, limit: u32 },
     /// Removes the recorded conflicts of a key.
     ClearConflicts {
         key: String,
@@ -457,6 +461,7 @@ impl DataCommand {
             }
             DataCommand::ClearConflicts { key, .. } => 128 + 2 * key.len(),
             DataCommand::Digest { id, .. } => 64 + id.len(),
+            DataCommand::IndexStep { .. } => 48,
             DataCommand::Fence { partitions, .. } | DataCommand::Release { partitions, .. } => {
                 128 + 8 * partitions.len()
             }
@@ -836,6 +841,17 @@ impl ReplicaGroup {
                     Err(e) => warn!(group = %self.id, error = %e, "digest failed"),
                 }
                 return Applied::Barrier;
+            }
+            DataCommand::IndexStep { now_ms, limit } => {
+                let result =
+                    engine
+                        .index_step_at(now_ms, limit as usize)
+                        .map(|step| WriteOutcome {
+                            version: step.version,
+                            deduplicated: false,
+                        });
+                self.check_apply(g, result.as_ref().err());
+                return Applied::Write(result);
             }
             DataCommand::ClearConflicts {
                 key,
