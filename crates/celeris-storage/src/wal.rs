@@ -15,6 +15,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::codec::{DecodeError, Decoder, put_u8, put_u32};
 use crate::entry::Entry;
@@ -33,7 +34,8 @@ const RECORD_BATCH: u8 = 1;
 #[derive(Debug)]
 pub(crate) struct WalWriter {
     path: PathBuf,
-    file: File,
+    /// Shared so a group commit can fsync without holding the writer.
+    file: Arc<File>,
     sync_on_append: bool,
 }
 
@@ -55,7 +57,7 @@ impl WalWriter {
         fsutil::sync_dir(dir).map_err(io_err(dir))?;
         Ok(WalWriter {
             path,
-            file,
+            file: Arc::new(file),
             sync_on_append,
         })
     }
@@ -78,11 +80,25 @@ impl WalWriter {
         frame.extend_from_slice(&len_bytes);
         frame.extend_from_slice(&frame_crc(&len_bytes, payload).to_le_bytes());
         frame.extend_from_slice(payload);
-        self.file.write_all(&frame)?;
+        (&*self.file).write_all(&frame)?;
         if self.sync_on_append {
             self.file.sync_data()?;
         }
         Ok(frame.len())
+    }
+
+    /// Like [`WalWriter::append`], but never syncs; the caller makes the
+    /// frame durable later (group commit).
+    pub(crate) fn append_unsynced(&mut self, payload: &[u8]) -> io::Result<usize> {
+        let sync = std::mem::replace(&mut self.sync_on_append, false);
+        let result = self.append(payload);
+        self.sync_on_append = sync;
+        result
+    }
+
+    /// A handle to fsync the file without holding the writer.
+    pub(crate) fn handle(&self) -> Arc<File> {
+        Arc::clone(&self.file)
     }
 
     pub(crate) fn sync(&mut self) -> io::Result<()> {

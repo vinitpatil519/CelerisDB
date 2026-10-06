@@ -256,4 +256,9 @@ Not done: resumable change streams (from a log position).
 
 ## M9 — Hardening
 
-Chaos suite, security (authn/z, TLS), benchmarks, backup/restore.
+* [x] Group commit (D-026): 3–5× fsync-bound write throughput.
+* [ ] Authentication: API tokens with read / write / admin scopes.
+* [ ] TLS for the client API and the cluster port (rustls).
+* [ ] Online backup and restore.
+* [ ] Criterion micro-benchmarks for the storage engine.
+* [ ] Chaos suite beyond the current crash, failover and partition tests.

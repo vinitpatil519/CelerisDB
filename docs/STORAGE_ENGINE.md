@@ -10,14 +10,47 @@ Engine::write(batch)
   ├─ validate keys / values / TTL / batch size
   ├─ lock writer
   ├─ mutation-ID dedupe lookup ─► already committed? return original version
-  ├─ evaluate conditions (Absent / Version) against current state
+  ├─ evaluate conditions (Absent / Version) against current state,
+  │  including writes still waiting for their fsync
   ├─ stall: too many immutable memtables? flush inline (before WAL append)
   ├─ assign commit sequence number
   ├─ append ONE WAL frame: all ops + dedupe record   ← atomicity point
-  ├─ fsync (SyncMode::Always)                        ← durability point
-  ├─ insert into memtable (visible to readers)
+  ├─ unlock writer (other batches append meanwhile)
+  ├─ group commit: one writer fsyncs for every frame  ← durability point
+  │  appended so far; the rest wait for it
+  ├─ insert the synced batches into the memtable in sequence order
+  │  (visible to readers only now)
   └─ memtable full? sync WAL, rotate to new WAL, schedule background flush
 ```
+
+### Group commit (`SyncMode::Always`)
+
+Writers append their WAL frame under the writer lock, then release it and
+queue for the fsync. The first writer in line fsyncs the WAL. That fsync
+covers every frame appended before it started, so the writers behind it find
+their batch already durable and return without syncing. While one fsync
+runs, new writers keep appending, and the next fsync covers all of them.
+
+Visibility and correctness:
+
+* A batch becomes visible only after its fsync. Until then it sits in an
+  in-memory queue, so a reader can never observe data that a crash would
+  lose.
+* Later writes check conditions and mutation IDs against the queued batches
+  as well as the memtable. Compare-and-set therefore stays exact, and a
+  retry of a queued mutation waits for the original's fsync, then returns
+  its version.
+* Batches publish in sequence order, so versions stay totally ordered.
+* Rotating the memtable syncs the WAL and publishes every queued batch
+  first. A WAL file is never retired while one of its batches is still
+  queued.
+* If an fsync fails, the engine is poisoned. Every queued batch fails with
+  `WalFailure`, an unknown outcome, because the frame may be on disk.
+
+On the development machine (Windows, NVMe, `fsync` on every batch), the
+put benchmark went from 1,551 to 4,967 ops/s with 8 clients, and from
+1,844 to 8,581 ops/s with 32. p99 latency fell from 10.3 ms to 3.8 ms
+with 8 clients.
 
 ## Read path
 
@@ -162,7 +195,6 @@ export both in Prometheus format.
 ## Known limitations
 
 * Full compaction (see `DECISIONS.md` D-003): write amplification grows with data size.
-* No group commit: with `SyncMode::Always` every batch pays one fsync. Throughput is fsync-bound.
 * Scans are not point-in-time snapshots (D-010).
 * No filesystem fault-injection layer yet, so the WAL-failure poison path is
   covered by code review, not by an automated test.

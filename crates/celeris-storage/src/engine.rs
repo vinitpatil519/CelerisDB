@@ -240,6 +240,19 @@ struct WriterState {
     wal: WalWriter,
     next_seq: u64,
     poisoned: Option<String>,
+    /// Group commit: batches written to the WAL but not yet fsynced, in
+    /// sequence order. They are invisible to readers until published.
+    unsynced: std::collections::VecDeque<UnsyncedBatch>,
+    /// The newest unpublished entry of each key in `unsynced`, so later
+    /// writes check conditions and retries against them.
+    overlay: std::collections::HashMap<Vec<u8>, Entry>,
+}
+
+#[derive(Debug)]
+struct UnsyncedBatch {
+    seq: u64,
+    entries: Vec<Entry>,
+    ops: usize,
 }
 
 impl WriterState {
@@ -272,6 +285,8 @@ struct Inner {
     last_seq: AtomicU64,
     bg_tx: Option<SyncSender<Task>>,
     bg_error: Mutex<Option<String>>,
+    /// Serializes group-commit fsyncs: one writer syncs for everyone queued.
+    sync_lock: Mutex<()>,
     recovery: RecoveryReport,
     _lock: File,
 }
@@ -288,6 +303,42 @@ impl fmt::Debug for Engine {
             .field("dir", &self.inner.dir)
             .field("last_version", &self.inner.last_seq.load(Ordering::Acquire))
             .finish_non_exhaustive()
+    }
+}
+
+/// (commit version, batch fingerprint) from a mutation record, if live.
+fn decode_mutation(entry: Option<Entry>, id: MutationId, now: u64) -> Result<Option<(u64, u64)>> {
+    let Some(e) = entry else {
+        return Ok(None);
+    };
+    if !e.is_live_at(now) {
+        return Ok(None);
+    }
+    let (Some(version), Some(fingerprint)) = (
+        e.value
+            .get(..8)
+            .and_then(|b| b.try_into().ok())
+            .map(u64::from_le_bytes),
+        e.value
+            .get(8..16)
+            .and_then(|b| b.try_into().ok())
+            .map(u64::from_le_bytes),
+    ) else {
+        return Err(StorageError::Internal(format!(
+            "malformed mutation record for {id}"
+        )));
+    };
+    Ok(Some((version, fingerprint)))
+}
+
+/// After a group commit the batch must be visible; anything else is a bug.
+fn check_visible(published: u64, seq: u64) -> Result<()> {
+    if published >= seq {
+        Ok(())
+    } else {
+        Err(StorageError::Internal(format!(
+            "group commit published up to {published}, not {seq}"
+        )))
     }
 }
 
@@ -494,6 +545,8 @@ impl Engine {
                 wal,
                 next_seq: max_seq + 1,
                 poisoned: None,
+                unsynced: std::collections::VecDeque::new(),
+                overlay: std::collections::HashMap::new(),
             }),
             version: RwLock::new(Arc::new(version)),
             maintenance: Mutex::new(manifest),
@@ -501,6 +554,7 @@ impl Engine {
             last_seq: AtomicU64::new(max_seq),
             bg_tx,
             bg_error: Mutex::new(None),
+            sync_lock: Mutex::new(()),
             recovery: report,
             _lock: lock,
         });
@@ -712,6 +766,7 @@ impl Engine {
         {
             let mut w = self.inner.writer.lock();
             w.check()?;
+            self.inner.drain(&mut w)?;
             if !self.inner.current().mem.table.read().is_empty() {
                 self.inner.rotate(&mut w)?;
             }
@@ -883,7 +938,7 @@ impl Drop for Engine {
         }
         let mut w = self.inner.writer.lock();
         if w.poisoned.is_none()
-            && let Err(e) = w.wal.sync()
+            && let Err(e) = self.inner.drain(&mut w)
         {
             warn!(error = %e, "final WAL sync on close failed");
         }
@@ -973,6 +1028,7 @@ impl Inner {
     fn ingest(&self, entries: Vec<Entry>, last_seq: u64) -> Result<()> {
         let mut w = self.writer.lock();
         w.check()?;
+        self.drain(&mut w)?;
         let marker = Entry {
             key: snapshot_marker_key(),
             seq: last_seq,
@@ -1046,27 +1102,99 @@ impl Inner {
 
     /// (commit version, batch fingerprint) of a remembered mutation.
     fn lookup_mutation(&self, v: &Version, id: MutationId, now: u64) -> Result<Option<(u64, u64)>> {
-        let Some(e) = self.get_entry(v, &mutation_key(id))? else {
-            return Ok(None);
-        };
-        if !e.is_live_at(now) {
-            return Ok(None);
+        decode_mutation(self.get_entry(v, &mutation_key(id))?, id, now)
+    }
+
+    /// The writer's view of a key: unpublished group-commit writes first.
+    fn writer_entry(&self, w: &WriterState, v: &Version, key: &[u8]) -> Result<Option<Entry>> {
+        match w.overlay.get(key) {
+            Some(e) => Ok(Some(e.clone())),
+            None => self.get_entry(v, key),
         }
-        let (Some(version), Some(fingerprint)) = (
-            e.value
-                .get(..8)
-                .and_then(|b| b.try_into().ok())
-                .map(u64::from_le_bytes),
-            e.value
-                .get(8..16)
-                .and_then(|b| b.try_into().ok())
-                .map(u64::from_le_bytes),
-        ) else {
-            return Err(StorageError::Internal(format!(
-                "malformed mutation record for {id}"
-            )));
+    }
+
+    /// Makes every queued group-commit batch durable and visible. Caller
+    /// holds `writer`.
+    fn drain(&self, w: &mut WriterState) -> Result<()> {
+        if w.unsynced.is_empty() {
+            return Ok(());
+        }
+        if let Err(e) = w.wal.sync() {
+            let reason = format!("sync of {} failed: {e}", w.wal.path().display());
+            error!(%reason, "WAL failure; engine is now read-only");
+            inc(&self.metrics.wal_failures);
+            w.poisoned = Some(reason.clone());
+            return Err(StorageError::WalFailure(reason));
+        }
+        inc(&self.metrics.wal_syncs);
+        self.publish(w, u64::MAX);
+        Ok(())
+    }
+
+    /// Moves durable group-commit batches (seq <= `upto`) into the memtable,
+    /// in order. Caller holds `writer`.
+    fn publish(&self, w: &mut WriterState, upto: u64) {
+        if w.unsynced.is_empty() {
+            return;
+        }
+        let v = self.current();
+        let mut table = v.mem.table.write();
+        while w.unsynced.front().is_some_and(|b| b.seq <= upto) {
+            let Some(batch) = w.unsynced.pop_front() else {
+                break;
+            };
+            for entry in batch.entries {
+                if w.overlay
+                    .get(&entry.key)
+                    .is_some_and(|e| e.seq == entry.seq)
+                {
+                    w.overlay.remove(&entry.key);
+                }
+                table.insert(entry);
+            }
+            self.last_seq.store(batch.seq, Ordering::Release);
+            inc(&self.metrics.write_batches);
+            add(&self.metrics.write_ops, batch.ops as u64);
+        }
+    }
+
+    /// Waits until batch `seq` is durable and visible, fsyncing the WAL for
+    /// every batch queued so far unless another writer already did.
+    fn commit(&self, seq: u64) -> Result<()> {
+        let _turn = self.sync_lock.lock();
+        if self.last_seq.load(Ordering::Acquire) >= seq {
+            return Ok(());
+        }
+        let (target, file, path) = {
+            let w = self.writer.lock();
+            w.check()?;
+            if self.last_seq.load(Ordering::Acquire) >= seq {
+                return Ok(());
+            }
+            (w.next_seq - 1, w.wal.handle(), w.wal.path().to_path_buf())
         };
-        Ok(Some((version, fingerprint)))
+        // Other writers keep appending while this fsync runs.
+        let synced = file.sync_data();
+        let mut w = self.writer.lock();
+        if let Err(e) = synced {
+            let reason = format!("sync of {} failed: {e}", path.display());
+            error!(%reason, "WAL failure; engine is now read-only");
+            inc(&self.metrics.wal_failures);
+            w.poisoned = Some(reason.clone());
+            return Err(StorageError::WalFailure(reason));
+        }
+        inc(&self.metrics.wal_syncs);
+        self.publish(&mut w, target);
+        let mem_bytes = self.current().mem.table.read().approx_bytes();
+        if mem_bytes >= self.opts.memtable_size_bytes {
+            // Durable already; a failed rotation is retried later.
+            match self.rotate(&mut w) {
+                Ok(()) => self.schedule_flush(),
+                Err(e) => warn!(error = %e, "memtable rotation failed; will retry"),
+            }
+        }
+        drop(w);
+        check_visible(self.last_seq.load(Ordering::Acquire), seq)
     }
 
     /// The newest entry of every key in the range, tombstones included.
@@ -1104,14 +1232,28 @@ impl Inner {
         let mut w = self.writer.lock();
         w.check()?;
         let now = at_ms.unwrap_or_else(|| self.clock.now_ms());
+        let group = self.opts.sync == SyncMode::Always && purge.is_none();
+        if !group {
+            // The direct path below reads and writes the memtable itself.
+            self.drain(&mut w)?;
+        }
         let v = self.current();
 
         // Idempotent retry: return the original outcome.
-        if let Some((version, previous)) = self.lookup_mutation(&v, batch.mutation_id(), now)? {
+        let id = batch.mutation_id();
+        if let Some((version, previous)) =
+            decode_mutation(self.writer_entry(&w, &v, &mutation_key(id))?, id, now)?
+        {
             if previous != fingerprint {
-                return Err(StorageError::MutationIdReused(batch.mutation_id()));
+                return Err(StorageError::MutationIdReused(id));
             }
             inc(&self.metrics.dedup_hits);
+            // The original may still be waiting for its fsync.
+            let pending = self.last_seq.load(Ordering::Acquire) < version;
+            drop(w);
+            if pending {
+                self.commit(version)?;
+            }
             return Ok(WriteOutcome {
                 version,
                 deduplicated: true,
@@ -1123,7 +1265,7 @@ impl Inner {
                 continue;
             };
             let actual = self
-                .get_entry(&v, op.key())?
+                .writer_entry(&w, &v, op.key())?
                 .filter(|e| e.is_live_at(now))
                 .map(|e| e.seq);
             let holds = match expected {
@@ -1176,6 +1318,31 @@ impl Inner {
             }));
         }
         let payload = wal::encode_batch(&entries);
+        if group {
+            if let Err(e) = w.wal.append_unsynced(&payload) {
+                let reason = format!("append to {} failed: {e}", w.wal.path().display());
+                error!(%reason, "WAL failure; engine is now read-only");
+                inc(&self.metrics.wal_failures);
+                w.poisoned = Some(reason.clone());
+                return Err(StorageError::WalFailure(reason));
+            }
+            add(&self.metrics.wal_bytes, payload.len() as u64);
+            w.next_seq += 1;
+            for entry in &entries {
+                w.overlay.insert(entry.key.clone(), entry.clone());
+            }
+            w.unsynced.push_back(UnsyncedBatch {
+                seq,
+                entries,
+                ops: batch.ops().len(),
+            });
+            drop(w);
+            self.commit(seq)?;
+            return Ok(WriteOutcome {
+                version: seq,
+                deduplicated: false,
+            });
+        }
         match w.wal.append(&payload) {
             Ok(n) => {
                 add(&self.metrics.wal_bytes, n as u64);
@@ -1304,6 +1471,9 @@ impl Inner {
             w.poisoned = Some(reason.clone());
             return Err(StorageError::WalFailure(reason));
         }
+        // Everything in the old WAL is durable now; publish it into the
+        // memtable that this WAL backs before freezing it.
+        self.publish(w, u64::MAX);
         let id = self.next_file_id.fetch_add(1, Ordering::SeqCst);
         w.wal = WalWriter::create(&self.dir, id, self.opts.sync == SyncMode::Always)?;
         let mut current = self.version.write();

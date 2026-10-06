@@ -225,6 +225,27 @@ Current limits:
   of partitions it does not currently serve (being imported, or not yet
   purged), so a record is never returned twice.
 
+## D-026 Group commit in the storage engine
+
+With `SyncMode::Always`, every batch paid its own fsync while holding the
+writer lock, so throughput was one fsync per batch (about 1,500–1,800 puts/s
+on the development machine, whatever the concurrency).
+
+* **Append, then sync outside the lock.** A writer appends its WAL frame
+  under the writer lock and releases it. A separate sync lock lets one
+  writer fsync for everyone queued; the fsync handle is a shared reference
+  to the WAL file, so appends continue during the fsync.
+* **Invisible until durable.** Synced batches move into the memtable in
+  sequence order. Before that, readers cannot see them. Publishing writes
+  before they are durable would let a reader observe data that a crash then
+  loses, which breaks linearizability.
+* **Writer overlay.** Conditions and mutation-ID dedupe consult the queued,
+  not yet visible batches first, so serial semantics are unchanged.
+* **Scope.** Only `SyncMode::Always` writes without a purge filter take this
+  path. Others first drain the queue, then use the direct path.
+* **Result.** 3.2× the throughput with 8 clients and 4.7× with 32, measured
+  A/B on the same machine. See [STORAGE_ENGINE.md](STORAGE_ENGINE.md).
+
 ## D-025 Automatic first placement; admin requests forwarded to the leader
 
 Found while running the 3-node compose cluster: a fresh cluster served

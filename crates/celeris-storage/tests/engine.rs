@@ -796,3 +796,127 @@ fn concurrent_writers_and_readers_with_background_flush() {
     assert_eq!(stats.poisoned, None);
     assert!(e.metrics().compactions > 0);
 }
+
+fn durable() -> Options {
+    Options {
+        sync: SyncMode::Always,
+        ..small()
+    }
+}
+
+/// Concurrent writers share fsyncs, and every acknowledged write is durable,
+/// visible, and has its own version.
+#[test]
+fn group_commit_shares_fsyncs_and_keeps_every_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = Arc::new(Engine::open(dir.path(), durable()).expect("open"));
+    let threads = 8;
+    let per_thread = 50;
+    let handles: Vec<_> = (0..threads)
+        .map(|t| {
+            let engine = Arc::clone(&engine);
+            thread::spawn(move || {
+                let mut versions = Vec::new();
+                for i in 0..per_thread {
+                    let key = format!("t{t}/k{i:03}");
+                    let out = engine
+                        .write(WriteBatch::new(MutationId::random()).put(key.as_str(), "v"))
+                        .expect("write");
+                    // Visible as soon as it is acknowledged.
+                    assert!(engine.get(key.as_bytes()).expect("get").is_some());
+                    versions.push(out.version);
+                }
+                versions
+            })
+        })
+        .collect();
+    let mut versions: Vec<u64> = handles
+        .into_iter()
+        .flat_map(|h| h.join().expect("join"))
+        .collect();
+    versions.sort_unstable();
+    versions.dedup();
+    assert_eq!(versions.len(), threads * per_thread, "unique versions");
+
+    let m = engine.metrics();
+    assert_eq!(m.write_batches, (threads * per_thread) as u64);
+    assert!(
+        m.wal_syncs <= m.write_batches,
+        "at most one fsync per batch ({} syncs, {} batches)",
+        m.wal_syncs,
+        m.write_batches
+    );
+
+    drop(engine);
+    let reopened = Engine::open(dir.path(), durable()).expect("reopen");
+    assert_eq!(all_keys(&reopened).len(), threads * per_thread);
+}
+
+/// Compare-and-set sees writes that are still waiting for their fsync, so
+/// concurrent increments never lose an update.
+#[test]
+fn group_commit_conditions_see_unsynced_writes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = Arc::new(Engine::open(dir.path(), durable()).expect("open"));
+    engine
+        .write(WriteBatch::new(MutationId::random()).put("counter", "0"))
+        .expect("seed");
+    let threads = 6;
+    let per_thread = 20;
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            let engine = Arc::clone(&engine);
+            thread::spawn(move || {
+                let mut done = 0;
+                while done < per_thread {
+                    let current = engine.get(b"counter").expect("get").expect("present");
+                    let n: u64 = String::from_utf8(current.value)
+                        .expect("utf8")
+                        .parse()
+                        .expect("number");
+                    let next = (n + 1).to_string();
+                    match engine.write(put_cond(
+                        "counter",
+                        &next,
+                        Condition::Version(current.version),
+                    )) {
+                        Ok(_) => done += 1,
+                        Err(StorageError::ConditionFailed { .. }) => {}
+                        Err(e) => panic!("write: {e}"),
+                    }
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("join");
+    }
+    assert_eq!(
+        val(&engine, "counter").as_deref(),
+        Some((threads * per_thread).to_string().as_str())
+    );
+}
+
+/// A retried mutation ID returns the original version, even while the
+/// original is still in flight.
+#[test]
+fn group_commit_deduplicates_concurrent_retries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let engine = Arc::new(Engine::open(dir.path(), durable()).expect("open"));
+    let id = MutationId::random();
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let engine = Arc::clone(&engine);
+            thread::spawn(move || {
+                engine
+                    .write(WriteBatch::new(id).put("same", "x"))
+                    .expect("write")
+            })
+        })
+        .collect();
+    let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().expect("join")).collect();
+    let first = outcomes[0].version;
+    assert!(outcomes.iter().all(|o| o.version == first));
+    assert_eq!(outcomes.iter().filter(|o| !o.deduplicated).count(), 1);
+    assert_eq!(engine.mutation_status(id).expect("status"), Some(first));
+}
