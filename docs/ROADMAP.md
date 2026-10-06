@@ -263,5 +263,6 @@ Not done: resumable change streams (from a log position).
 * [ ] TLS (mTLS) on the cluster port.
 * [x] Online backup and restore (D-029): consistent physical snapshots for
   a single node, JSON-lines export/import for any cluster.
-* [ ] Criterion micro-benchmarks for the storage engine.
+* [x] Criterion micro-benchmarks for the storage engine
+  (`cargo bench -p celeris-storage`; numbers in STORAGE_ENGINE.md).
 * [ ] Chaos suite beyond the current crash, failover and partition tests.

@@ -36,14 +36,15 @@ impl Memtable {
         self.map.get(key)
     }
 
-    pub(crate) fn first_in_range(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Option<&Entry> {
-        if bounds_empty(start, end) {
-            return None;
-        }
-        self.map
-            .range::<[u8], _>((start, end))
-            .next()
-            .map(|(_, e)| e)
+    /// Up to `max` entries in key order within the bounds.
+    pub(crate) fn range(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        max: usize,
+    ) -> impl Iterator<Item = &Entry> {
+        let range = (!bounds_empty(start, end)).then(|| self.map.range::<[u8], _>((start, end)));
+        range.into_iter().flatten().take(max).map(|(_, e)| e)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Entry> {
@@ -122,19 +123,23 @@ mod tests {
         m.insert(put("b", 1, "v"));
         let b: &[u8] = b"b";
         assert!(
-            m.first_in_range(Bound::Excluded(b), Bound::Excluded(b))
+            m.range(Bound::Excluded(b), Bound::Excluded(b), 10)
+                .next()
                 .is_none()
         );
         assert!(
-            m.first_in_range(Bound::Excluded(b), Bound::Included(b))
+            m.range(Bound::Excluded(b), Bound::Included(b), 10)
+                .next()
                 .is_none()
         );
         assert!(
-            m.first_in_range(Bound::Included(b"c"), Bound::Included(b))
+            m.range(Bound::Included(b"c"), Bound::Included(b), 10)
+                .next()
                 .is_none()
         );
         assert_eq!(
-            m.first_in_range(Bound::Included(b), Bound::Included(b))
+            m.range(Bound::Included(b), Bound::Included(b), 10)
+                .next()
                 .map(|e| e.seq),
             Some(1)
         );

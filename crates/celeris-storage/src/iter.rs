@@ -1,5 +1,6 @@
 //! Range iteration: per-source iterators and the newest-version-wins merge.
 
+use std::collections::VecDeque;
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -42,14 +43,20 @@ pub(crate) fn as_slice_bound(b: &Bound<Vec<u8>>) -> Bound<&[u8]> {
     b.as_ref().map(Vec::as_slice)
 }
 
-/// Walks a memtable one key at a time, re-taking the read lock per step so a
-/// long scan never blocks writers.
+/// Walks a memtable in chunks, re-taking the read lock per chunk so a long
+/// scan never blocks writers for long. Chunks start small (short scans and
+/// point lookups clone little) and double up to `MAX_CHUNK`.
 pub(crate) struct MemIter {
     slot: Arc<MemSlot>,
     cursor: Bound<Vec<u8>>,
     end: Bound<Vec<u8>>,
+    buffer: VecDeque<Entry>,
+    chunk: usize,
     done: bool,
 }
+
+const FIRST_CHUNK: usize = 8;
+const MAX_CHUNK: usize = 256;
 
 impl MemIter {
     pub(crate) fn new(slot: Arc<MemSlot>, start: Bound<Vec<u8>>, end: Bound<Vec<u8>>) -> Self {
@@ -57,8 +64,31 @@ impl MemIter {
             slot,
             cursor: start,
             end,
+            buffer: VecDeque::new(),
+            chunk: FIRST_CHUNK,
             done: false,
         }
+    }
+
+    fn refill(&mut self) {
+        self.buffer.extend(
+            self.slot
+                .table
+                .read()
+                .range(
+                    as_slice_bound(&self.cursor),
+                    as_slice_bound(&self.end),
+                    self.chunk,
+                )
+                .cloned(),
+        );
+        if self.buffer.len() < self.chunk {
+            self.done = true;
+        }
+        if let Some(last) = self.buffer.back() {
+            self.cursor = Bound::Excluded(last.key.clone());
+        }
+        self.chunk = (self.chunk * 2).min(MAX_CHUNK);
     }
 }
 
@@ -66,25 +96,10 @@ impl Iterator for MemIter {
     type Item = Result<Entry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
+        if self.buffer.is_empty() && !self.done {
+            self.refill();
         }
-        let next = self
-            .slot
-            .table
-            .read()
-            .first_in_range(as_slice_bound(&self.cursor), as_slice_bound(&self.end))
-            .cloned();
-        match next {
-            Some(entry) => {
-                self.cursor = Bound::Excluded(entry.key.clone());
-                Some(Ok(entry))
-            }
-            None => {
-                self.done = true;
-                None
-            }
-        }
+        self.buffer.pop_front().map(Ok)
     }
 }
 
@@ -175,6 +190,29 @@ mod tests {
 
     fn src(entries: Vec<Entry>) -> EntryIter {
         Box::new(entries.into_iter().map(Ok))
+    }
+
+    #[test]
+    fn mem_iter_crosses_chunk_boundaries_and_sees_later_keys() {
+        let mut table = crate::memtable::Memtable::default();
+        for i in 0..1_000 {
+            table.insert(e(&format!("k{i:04}"), i + 1));
+        }
+        let slot = Arc::new(MemSlot::new(table, Vec::new()));
+        let mut it = MemIter::new(
+            Arc::clone(&slot),
+            Bound::Excluded(b"k0099".to_vec()),
+            Bound::Included(b"k0900".to_vec()),
+        );
+        let first: Vec<Entry> = it.by_ref().take(5).map(|r| r.expect("entry")).collect();
+        assert_eq!(first[0].key, b"k0100");
+        // Not a snapshot: a key written ahead of the cursor is observed.
+        slot.table.write().insert(e("k0500a", 5_000));
+        let rest: Vec<Vec<u8>> = it.map(|r| r.expect("entry").key).collect();
+        assert_eq!(rest.len(), 801 - 5 + 1);
+        assert!(rest.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(rest.last().map(Vec::as_slice), Some(&b"k0900"[..]));
+        assert!(rest.iter().any(|k| k == b"k0500a"));
     }
 
     #[test]

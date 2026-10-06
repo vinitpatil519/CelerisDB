@@ -204,6 +204,42 @@ meanwhile: the version holds `Arc`s to its tables, and a table file is
 deleted only when its last reference drops. `Engine::create_from_snapshot`
 restores it into an empty directory with the original versions.
 
+## Benchmarks
+
+Criterion micro-benchmarks live in `crates/celeris-storage/benches/engine.rs`:
+
+```bash
+cargo bench -p celeris-storage                  # full run, HTML-free text report
+cargo bench -p celeris-storage -- --quick get   # one group, fast
+```
+
+128-byte values, 50,000 preloaded keys, `SyncMode::Never` unless noted. One
+run on a Windows 11 laptop (NVMe SSD), so use them to compare changes, not
+as absolute numbers:
+
+| Benchmark | Time | Throughput |
+|---|---|---|
+| `put/single` | 6.4 µs | 156 K puts/s |
+| `put/batch_10` | 30 µs | 330 K keys/s |
+| `put/fsync/1_writers` (`Always`) | 403 µs | 2.5 K puts/s |
+| `put/fsync/8_writers` (`Always`, group commit) | 183 µs per put | 5.5 K puts/s |
+| `get/hit/memtable` | 1.1 µs | 920 K/s |
+| `get/hit/sstable` | 1.9 µs | 540 K/s |
+| `get/miss/sstable` (bloom filter) | 0.26 µs | 3.8 M/s |
+| `scan/100/memtable` | 31 µs | 3.2 M rows/s |
+| `scan/100/sstable` | 23 µs | 4.3 M rows/s |
+| `maintenance/flush_50k` | 62 ms | 800 K keys/s |
+| `maintenance/compact_50k` (4 L0 tables) | 57 ms | 880 K keys/s |
+| `maintenance/backup_50k` | 35 ms | 1.4 M keys/s |
+
+`put/batch_100` stalls on inline flushes once the memtables fill (the
+benchmark disables background work), so it measures flush cost more than
+batching.
+
+Memtable scans copy entries in chunks of 8 to 256 per read-lock acquisition.
+Before that change they took one lock and one tree seek per row and ran at
+1.8 M rows/s.
+
 ## Known limitations
 
 * Full compaction (see `DECISIONS.md` D-003): write amplification grows with data size.
