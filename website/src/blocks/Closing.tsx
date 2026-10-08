@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { CodeBlock, GitHubIcon, SectionHead } from "../components/kit";
-import { DOC, DOCS, INSTALL, REPO } from "../data/site";
+import { DOCS, INSTALL, REPO } from "../data/site";
 
 const PROOF = [
   {
@@ -72,9 +72,6 @@ export function Cta() {
             </a>
             <a className="btn btn-ghost" href={DOCS}>
               Read the docs
-            </a>
-            <a className="btn btn-ghost" href={DOC("CelerisDB-Overview.pdf")}>
-              Overview (PDF)
             </a>
           </div>
         </div>

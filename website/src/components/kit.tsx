@@ -256,6 +256,14 @@ export function Footer() {
         ["All docs", DOCS],
       ],
     },
+    {
+      title: "Connect",
+      links: [
+        ["Vinit Patil", "https://www.linkedin.com/in/vinit-patil-a3384728a/"],
+        ["vinitonterminal@gmail.com", "mailto:vinitonterminal@gmail.com"],
+        ["LinkedIn", "https://www.linkedin.com/in/vinit-patil-a3384728a/"],
+      ],
+    },
   ];
   return (
     <footer className="footer" data-theme="dark">
@@ -267,6 +275,7 @@ export function Footer() {
           </a>
           <p>A distributed JSON database where every request chooses its consistency.</p>
           <p className="muted">Apache-2.0 · self-hosted · written in Rust</p>
+          <p className="muted">Built by Vinit Patil</p>
         </div>
         {cols.map((c) => (
           <div key={c.title} className="footer-col">
