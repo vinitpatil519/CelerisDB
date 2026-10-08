@@ -13,3 +13,11 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 *.tsbuildinfo
+
+# Local reference docs, not published
+/prd.md
+/architecture.md
+/landingpage.md
+/CODING_AGENT_GUIDE.md
+/AGENTS.md
+/CLAUDE.md
