@@ -36,8 +36,11 @@ export function App() {
       <aside className="sidebar">
         <div className="brand">
           <svg viewBox="0 0 32 32" aria-hidden="true">
-            <circle cx="16" cy="16" r="10" />
-            <circle cx="16" cy="16" r="3" className="dot" />
+            <rect x="1" y="1" width="30" height="30" rx="8" fill="#05070a" stroke="none" />
+            <circle cx="16" cy="9" r="3.2" fill="#fff" stroke="none" />
+            <circle cx="9" cy="21.5" r="3.2" fill="#fff" stroke="none" />
+            <circle cx="23" cy="21.5" r="3.2" fill="#fff" stroke="none" />
+            <path d="M16 9 9 21.5h14Z" fill="none" stroke="#fff" strokeWidth="1.6" strokeLinejoin="round" />
           </svg>
           <span>Celeris</span>
           <small>console</small>

@@ -9,11 +9,11 @@ import { jump } from "../motion";
 export function Mark({ size = 22 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
-      <rect x="1" y="1" width="30" height="30" rx="8" fill="currentColor" opacity="0.12" />
-      <circle cx="16" cy="9" r="3.2" fill="currentColor" />
-      <circle cx="9" cy="21.5" r="3.2" fill="currentColor" />
-      <circle cx="23" cy="21.5" r="3.2" fill="currentColor" />
-      <path d="M16 9 9 21.5h14Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+      <rect x="1" y="1" width="30" height="30" rx="8" fill="#05070a" />
+      <circle cx="16" cy="9" r="3.2" fill="#fff" />
+      <circle cx="9" cy="21.5" r="3.2" fill="#fff" />
+      <circle cx="23" cy="21.5" r="3.2" fill="#fff" />
+      <path d="M16 9 9 21.5h14Z" fill="none" stroke="#fff" strokeWidth="1.6" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -275,7 +275,7 @@ export function Footer() {
           </a>
           <p>A distributed JSON database where every request chooses its consistency.</p>
           <p className="muted">Apache-2.0 · self-hosted · written in Rust</p>
-          <p className="muted">Built by Vinit Patil</p>
+          <p className="muted">Built by Vinit Patil, Mumbai</p>
         </div>
         {cols.map((c) => (
           <div key={c.title} className="footer-col">
