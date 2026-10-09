@@ -1,0 +1,128 @@
+.rt-wrap {
+  display: grid;
+  gap: 12px;
+}
+.rt-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rt-id {
+  font-family: var(--d-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  color: var(--d-muted);
+  background: var(--d-bg-3);
+  border: 1px solid var(--d-line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  overflow-wrap: anywhere;
+}
+.rt-id b {
+  color: var(--d-text);
+  font-weight: 600;
+}
+.rt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.rt-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--d-line);
+  border-radius: 10px;
+  background: var(--d-bg-2);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.rt-row.rt-on {
+  opacity: 1;
+  transform: none;
+}
+.rt-num {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--d-accent-soft);
+  color: var(--d-accent-ink);
+}
+.rt-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.rt-node {
+  font-family: var(--d-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  color: var(--d-text);
+}
+.rt-res {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--d-line-2);
+  color: var(--d-text);
+}
+.rt-res.rt-ok {
+  color: var(--d-ok);
+  border-color: var(--d-ok);
+}
+.rt-res.rt-warn {
+  color: var(--d-warn);
+  border-color: var(--d-warn);
+}
+.rt-res.rt-bad {
+  color: var(--d-bad);
+  border-color: var(--d-bad);
+}
+.rt-note {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--d-muted);
+  line-height: 1.5;
+}
+.rt-wait {
+  font-size: 12px;
+  color: var(--d-faint);
+}
+.rt-final {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--d-line-2);
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--d-bg-3);
+  color: var(--d-text);
+}
+.rt-final.rt-ok {
+  border-color: var(--d-ok);
+}
+.rt-final.rt-bad {
+  border-color: var(--d-bad);
+}
+.rt-final.rt-warn {
+  border-color: var(--d-warn);
+}
+.rt-caption {
+  margin: 0;
+  font-size: 13px;
+  color: var(--d-muted);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rt-row {
+    transition: none;
+    transform: none;
+  }
+}

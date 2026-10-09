@@ -1,0 +1,24 @@
+.ta-wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 20px; }
+.ta-inputs { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.ta-field { display: flex; flex-direction: column; gap: 6px; }
+.ta-field > label, .ta-field > .ta-label { font-weight: 600; font-size: 0.9rem; color: var(--d-text); }
+.ta-field output { font-weight: 500; color: var(--d-accent-ink); margin-left: 6px; }
+.ta-field input[type="range"] { width: 100%; accent-color: var(--d-accent); }
+.ta-ticks { display: flex; justify-content: space-between; font-size: 0.74rem; color: var(--d-faint); }
+.ta-seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.ta-seg button { border: 1px solid var(--d-line-2); background: var(--d-bg); color: var(--d-text); border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 0.86rem; cursor: pointer; }
+.ta-seg button[aria-pressed="true"] { background: var(--d-accent-soft); border-color: var(--d-accent); color: var(--d-accent-ink); font-weight: 600; }
+.ta-checks { display: flex; flex-direction: column; gap: 6px; }
+.ta-checks label { display: flex; gap: 8px; align-items: flex-start; font-size: 0.9rem; cursor: pointer; }
+.ta-checks input { margin-top: 3px; accent-color: var(--d-accent); }
+.ta-out { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ta-rec { border: 1px solid var(--d-line); border-left: 3px solid var(--d-accent); border-radius: 8px; background: var(--d-bg-2); padding: 10px 12px; }
+.ta-rec.warn { border-left-color: var(--d-warn); }
+.ta-rec strong { display: block; margin-bottom: 2px; }
+.ta-rec p { margin: 0; font-size: 0.9rem; color: var(--d-muted); }
+.ta-rec code { font-size: 0.85em; }
+.ta-rec a { white-space: nowrap; }
+.ta-out h4 { margin: 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--d-faint); }
+@media (max-width: 760px) {
+  .ta-wrap { grid-template-columns: minmax(0, 1fr); }
+}

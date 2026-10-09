@@ -391,6 +391,15 @@ p {
   font-size: 14px;
 }
 
+.nav-docs {
+  font-weight: 500;
+  opacity: 0.9;
+}
+
+.nav-docs:hover {
+  opacity: 1;
+}
+
 .nav-gh {
   display: inline-flex;
   align-items: center;

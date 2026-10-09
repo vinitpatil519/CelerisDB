@@ -1,0 +1,24 @@
+.ss-root { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ss-layer { border: 1px solid var(--d-line-2); border-radius: 12px; padding: 10px 12px; background: var(--d-bg-2); transition: border-color 0.3s ease, background 0.3s ease; }
+.ss-layer.mem { border-style: dashed; }
+.ss-root.down .ss-layer.mem { border-color: var(--d-bad); background: color-mix(in srgb, var(--d-bad) 10%, var(--d-bg-2)); }
+.ss-root.f-recover .ss-layer.mem { border-color: var(--d-ok); }
+.ss-lh { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px; margin-bottom: 8px; font-size: 14px; }
+.ss-tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+.ss-tag.volatile { color: var(--d-warn); border: 1px solid var(--d-warn); }
+.ss-tag.durable { color: var(--d-ok); border: 1px solid var(--d-ok); }
+.ss-items { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; align-items: center; }
+.ss-items.files { flex-direction: column; align-items: stretch; }
+.ss-file { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px; border: 1px solid var(--d-line-2); border-radius: 8px; background: var(--d-bg); animation: ss-in 0.4s ease-out; }
+.ss-chip { display: inline-flex; align-items: baseline; gap: 4px; padding: 3px 9px; border-radius: 7px; color: #fff; font: 600 12px ui-monospace, Menlo, Consolas, monospace; animation: ss-in 0.4s ease-out; }
+.ss-chip small { opacity: 0.8; font-weight: 500; font-size: 10px; }
+.ss-void { font-size: 12px; color: var(--d-faint); font-style: italic; }
+.ss-ghost { font: 600 12px ui-monospace, Menlo, Consolas, monospace; padding: 3px 9px; border-radius: 7px; border: 1px dashed var(--d-bad); color: var(--d-bad); text-decoration: line-through; }
+.ss-arrow { text-align: center; font-size: 11px; color: var(--d-faint); position: relative; line-height: 1; padding: 2px 0; }
+.ss-arrow::before { content: ""; display: inline-block; width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid var(--d-line-2); margin-right: 6px; vertical-align: middle; }
+.ss-msg { margin: 6px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--d-accent-soft); font-size: 14px; line-height: 1.5; min-height: 3.2em; }
+@keyframes ss-in { from { opacity: 0; transform: translateY(-6px) scale(0.96); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .ss-chip, .ss-file { animation: none; }
+  .ss-layer { transition: none; }
+}

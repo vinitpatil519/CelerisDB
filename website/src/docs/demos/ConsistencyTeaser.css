@@ -1,0 +1,24 @@
+.ct { display: flex; flex-direction: column; gap: 12px; }
+.ct-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.ct-chip {
+  background: var(--d-bg-2);
+  color: var(--d-text);
+  border: 1px solid var(--d-line-2);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-family: var(--mono);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+.ct-chip:hover { border-color: var(--d-accent); }
+.ct-chip[aria-pressed="true"] { background: var(--d-accent); border-color: var(--d-accent); color: var(--d-accent-ink); }
+.ct-chip:focus-visible { outline: 2px solid var(--d-accent); outline-offset: 2px; }
+.ct-panel { border: 1px solid var(--d-line); border-radius: 10px; padding: 14px 16px; background: var(--d-bg-2); }
+.ct-panel h4 { margin: 0 0 4px; font-family: var(--mono); }
+.ct-panel p { margin: 0 0 10px; font-size: 14px; }
+.ct-meters { display: grid; gap: 8px; }
+.ct-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 10px; font-size: 12.5px; color: var(--d-muted); }
+.ct-bar { height: 8px; border-radius: 4px; background: var(--d-line); overflow: hidden; }
+.ct-fill { display: block; height: 100%; background: var(--d-accent); border-radius: 4px; transition: width 0.45s ease; }
+@media (prefers-reduced-motion: reduce) { .ct-fill, .ct-chip { transition: none; } }

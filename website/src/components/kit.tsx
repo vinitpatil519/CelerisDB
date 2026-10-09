@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 import { useEffect, useState, type ReactNode } from "react";
 
-import { DOCS, REPO } from "../data/site";
+import { DOCS, DOCS_PAGE, REPO } from "../data/site";
 import { jump } from "../motion";
 
 /* ── Brand ─────────────────────────────────────────────────────────────── */
@@ -150,6 +150,9 @@ export function Nav() {
           ))}
         </div>
         <div className="nav-actions">
+          <a className="nav-docs" href={DOCS}>
+            Docs
+          </a>
           <a className="nav-gh" href={REPO}>
             <GitHubIcon /> <span>GitHub</span>
           </a>
@@ -242,9 +245,10 @@ export function Footer() {
     {
       title: "Documentation",
       links: [
-        ["API reference", `${REPO}/blob/main/docs/API.md`],
-        ["CLI", `${REPO}/blob/main/docs/CLI.md`],
-        ["Deployment", `${REPO}/blob/main/docs/DEPLOYMENT.md`],
+        ["Quickstart", DOCS_PAGE("quickstart")],
+        ["HTTP API reference", DOCS_PAGE("http-api")],
+        ["CLI reference", DOCS_PAGE("cli")],
+        ["Deployment", DOCS_PAGE("deployment")],
         ["Design decisions", `${REPO}/blob/main/docs/DECISIONS.md`],
       ],
     },
@@ -276,6 +280,7 @@ export function Footer() {
           <p>A distributed JSON database where every request chooses its consistency.</p>
           <p className="muted">Apache-2.0 · self-hosted · written in Rust</p>
           <p className="muted">Built by Vinit Patil, Mumbai</p>
+          <p className="muted">© 2026 Vinit Patil. Licensed under Apache-2.0; attribution required.</p>
         </div>
         {cols.map((c) => (
           <div key={c.title} className="footer-col">

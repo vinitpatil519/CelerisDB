@@ -1,7 +1,8 @@
 export const REPO = "https://github.com/vinitpatil519/CelerisDB";
 export const RAW = "https://raw.githubusercontent.com/vinitpatil519/CelerisDB/main";
 export const IMAGE = "ghcr.io/vinitpatil519/celeris:latest";
-export const DOCS = `${REPO}/tree/main/docs`;
+export const DOCS = "./docs/";
+export const DOCS_PAGE = (slug: string) => `./docs/#/${slug}`;
 export const DOC = (file: string) => `${REPO}/blob/main/docs/${file}`;
 
 export type ModeId = "strict" | "session" | "bounded" | "available" | "eventual";
