@@ -2589,23 +2589,7 @@ p {
 /* ── Benchmarks ───────────────────────────────────────────────────────── */
 
 .bench .section-head {
-  margin-bottom: 32px;
-}
-
-.bench-notice {
-  max-width: 760px;
   margin-bottom: 72px;
-  padding: 14px 18px;
-  border: 1px solid var(--ink-line);
-  border-left: 3px solid var(--warn);
-  border-radius: 10px;
-  font-size: 15px;
-  color: var(--ink-muted);
-}
-
-.bench-notice b {
-  color: var(--ink-text);
-  font-weight: 600;
 }
 
 .race-claim {

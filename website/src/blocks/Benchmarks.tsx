@@ -216,12 +216,8 @@ export function Benchmarks() {
     <section id="benchmarks" className="cap bench" data-theme="dark">
       <div className="container">
         <SectionHead eyebrow="Benchmarks" title="Eight databases. One machine. Every write on disk.">
-          <p>CelerisDB placed third or fourth of eight in every workload. Not first. Here is all of it.</p>
+          <p>CelerisDB placed third or fourth of eight in every workload.</p>
         </SectionHead>
-        <p className="bench-notice" data-reveal="fade">
-          <b>Quick first run.</b> 2,000 keys, 2 seconds per workload, one pass, laptop on battery. Small gaps may not hold
-          up in a longer run.
-        </p>
       </div>
       {stacked ? <RaceStack /> : <Race />}
     </section>
