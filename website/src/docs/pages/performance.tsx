@@ -13,7 +13,7 @@ function Body() {
 
       <Callout kind="warn" title="About the numbers on this page">
         <p>
-          The only figures here are the ones recorded in the repository, measured on one Windows 11 laptop with an NVMe SSD.
+          The only figures here are the ones recorded in the repository, measured on one Ryzen 5 4600H laptop (Linux, NVMe SSD).
           The micro-benchmarks run against the storage engine alone (no HTTP, no network, no replication). Treat them as a
           way to compare changes, not as capacity promises. Your hardware, operating system, value sizes and sync mode will
           give different results, so always measure your own workload.
@@ -75,9 +75,9 @@ sync = "always"   # or "never"`}</Code>
         ]}
       />
       <p>
-        The storage micro-benchmark shows the same shape: about 2.5 K puts/s with one writer under sync always, and about
-        5.5 K puts/s with eight writers sharing flushes. With <code>sync = "never"</code> the same benchmark records about
-        156 K single puts/s, which shows how much of the always-mode cost is the flush itself.
+        The storage micro-benchmark shows the same shape: about 1.6 K puts/s with one writer under sync always, and about
+        3.1 K puts/s with eight writers sharing flushes. With <code>sync = "never"</code> the same benchmark records about
+        73 K single puts/s, which shows how much of the always-mode cost is the flush itself.
       </p>
       <Callout kind="tip">
         <p>
@@ -102,8 +102,8 @@ sync = "always"   # or "never"`}</Code>
         ]}
       />
       <p>
-        In the storage micro-benchmark, a batch of ten keys took about 30 microseconds against 6.4 microseconds for a single
-        put (sync never), which is roughly 330 K keys/s against 156 K. Larger batches stop helping once the memtables
+        In the storage micro-benchmark, a batch of ten keys took about 72 microseconds against 14 microseconds for a single
+        put (sync never), which is roughly 139 K keys/s against 73 K. Larger batches stop helping once the memtables
         fill; the benchmark for batches of 100 mostly measures flush cost, because it disables background work.
       </p>
       <CodeTabs
@@ -226,9 +226,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         </li>
       </ul>
       <p>
-        Point reads of keys that do not exist are cheap: the micro-benchmark records about 0.26 microseconds per miss thanks
-        to bloom filters, against about 1.9 microseconds for a hit in a table on disk and about 1.1 microseconds for a hit
-        in the in-memory table.
+        Point reads of keys that do not exist are cheap: the micro-benchmark records about 1.3 microseconds per miss, against
+        about 2.6 microseconds for a hit in a table on disk and about 2.2 microseconds for a hit in the in-memory table.
+        Bloom filters make a miss across eight overlapping tables 1.6 times faster than with filters nearly disabled.
       </p>
 
       <H2 id="consistency-cost">Consistency mode and its cost</H2>
@@ -515,21 +515,21 @@ latency     p50 <t>  p95 <t>  p99 <t>  max <t>`}</Code>
       <H2 id="reference">Reference micro-benchmarks</H2>
       <p>
         These come from the storage engine&apos;s criterion benchmarks (128 byte values, 50,000 preloaded keys, sync never
-        unless noted), one run on a Windows 11 laptop with an NVMe SSD. Use them to see relative costs.
+        unless noted), one idle run on a Ryzen 5 4600H laptop (Linux, NVMe SSD). Use them to see relative costs.
       </p>
       <Table
         head={["Benchmark", "Time", "Rate"]}
         rows={[
-          ["Single put", "6.4 us", "156 K puts/s"],
-          ["Batch of 10 puts", "30 us", "330 K keys/s"],
-          ["Put, sync always, 1 writer", "403 us", "2.5 K puts/s"],
-          ["Put, sync always, 8 writers (group commit)", "183 us per put", "5.5 K puts/s"],
-          ["Get, hit in memory", "1.1 us", "920 K/s"],
-          ["Get, hit in a table", "1.9 us", "540 K/s"],
-          ["Get, miss (bloom filter)", "0.26 us", "3.8 M/s"],
-          ["Scan of 100 rows, tables", "23 us", "4.3 M rows/s"],
-          ["Flush 50 K keys", "62 ms", "800 K keys/s"],
-          ["Compact 50 K keys (4 tables)", "57 ms", "880 K keys/s"],
+          ["Single put", "13.7 us", "73 K puts/s"],
+          ["Batch of 10 puts", "72 us", "139 K keys/s"],
+          ["Put, sync always, 1 writer", "619 us", "1.6 K puts/s"],
+          ["Put, sync always, 8 writers (group commit)", "319 us per put", "3.1 K puts/s"],
+          ["Get, hit in memory", "2.2 us", "463 K/s"],
+          ["Get, hit in a table", "2.6 us", "383 K/s"],
+          ["Get, miss (bloom filter)", "1.3 us", "773 K/s"],
+          ["Scan of 100 rows, tables", "28 us", "3.6 M rows/s"],
+          ["Flush 50 K keys", "48 ms", "1.05 M keys/s"],
+          ["Compact 50 K keys (4 tables)", "43 ms", "1.17 M keys/s"],
         ]}
       />
       <p>

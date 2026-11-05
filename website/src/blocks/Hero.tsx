@@ -197,11 +197,11 @@ function Metrics({ cut }: { cut: boolean }) {
   return (
     <div className="metrics">
       <div>
-        <span className="metric-label">ops / s</span>
+        <span className="metric-label" title="Simulated demo console, not a measurement">ops / s · demo</span>
         <span className="metric-value">{ops.toLocaleString("en-US")}</span>
       </div>
       <div>
-        <span className="metric-label">p99 write</span>
+        <span className="metric-label" title="Simulated demo console, not a measurement">p99 write · demo</span>
         <span className="metric-value">{cut ? "3.4" : "2.2"} ms</span>
       </div>
       <div>

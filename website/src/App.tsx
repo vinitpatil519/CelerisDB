@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 
 import { Architecture } from "./blocks/Architecture";
 import { Band } from "./blocks/Band";
+import { BenchmarkDetails, Benchmarks } from "./blocks/Benchmarks";
 import { Cap } from "./blocks/Cap";
 import { Cta, Proof } from "./blocks/Closing";
 import { Developers } from "./blocks/Developers";
@@ -47,6 +48,8 @@ export function App() {
         <Architecture />
         <Partitions />
         <Features />
+        <Benchmarks />
+        <BenchmarkDetails />
         <Integrations />
         <Developers />
         <Proof />

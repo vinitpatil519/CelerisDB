@@ -114,6 +114,7 @@ const NAV = [
   { id: "modes", label: "Consistency" },
   { id: "architecture", label: "Architecture" },
   { id: "features", label: "Features" },
+  { id: "benchmarks", label: "Benchmarks" },
   { id: "integrations", label: "Integrations" },
   { id: "developers", label: "Developers" },
 ];
@@ -239,6 +240,7 @@ export function Footer() {
         ["Consistency modes", "#modes"],
         ["Architecture", "#architecture"],
         ["Features", "#features"],
+        ["Benchmarks", "#benchmarks"],
         ["Integrations", "#integrations"],
       ],
     },

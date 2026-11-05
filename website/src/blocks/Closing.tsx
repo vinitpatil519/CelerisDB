@@ -25,7 +25,7 @@ const PROOF = [
   {
     kicker: "Performance",
     title: "Engine benchmarks",
-    text: "~156K writes/s, ~4M rows/s scanned, per core.",
+    text: "~73K writes/s and ~4M rows/s scanned, in-process, no fsync.",
     metric: "cargo bench -p celeris-storage",
   },
 ];
