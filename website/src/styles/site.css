@@ -2832,50 +2832,13 @@ p {
   background: var(--accent);
 }
 
-.bench-setup {
-  margin-top: 40px;
-}
-
-.bench-limits {
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
-  gap: 48px;
-  margin-top: 40px;
-  padding: 32px;
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  background: var(--paper);
-}
-
-.bench-limits h3 {
-  margin-bottom: 16px;
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.bench-limits ul {
-  display: grid;
-  gap: 12px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: 15px;
+.bench-method {
+  margin-top: 20px;
+  font-size: 14px;
   color: var(--muted);
 }
 
-.bench-limits li b {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.bench-links {
-  display: flex;
-  gap: 20px;
-  margin-top: 14px;
-  font-size: 14px;
-}
-
-.bench-links a {
+.bench-method a {
   color: var(--accent-ink);
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -2934,12 +2897,6 @@ p {
   background: var(--accent-soft);
 }
 
-@media (max-width: 1080px) {
-  .bench-limits {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 @media (max-width: 720px) {
   .lat {
     padding: 16px;
@@ -2965,8 +2922,5 @@ p {
   .lat-top .seg {
     max-width: 100%;
     overflow-x: auto;
-  }
-  .bench-limits {
-    padding: 20px;
   }
 }

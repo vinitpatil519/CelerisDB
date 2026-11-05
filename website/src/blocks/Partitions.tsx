@@ -90,7 +90,7 @@ export function Partitions() {
   return (
     <section id="placement" className="section" data-theme="light">
       <div className="container">
-        <SectionHead eyebrow="Runtime topology" title="4,096 partitions. Placed, not configured.">
+        <SectionHead eyebrow="Runtime topology" title="4,096 partitions, placed automatically.">
           <p>Rendezvous hashing across zones. Add a node and only ~1/N moves.</p>
         </SectionHead>
 

@@ -238,11 +238,11 @@ export function Hero() {
         <div className="hero-copy">
           <p className="eyebrow">Distributed JSON database</p>
           <h1>
-            One database.
+            Choose consistency
             <br />
-            <span className="h1-accent">Every consistency.</span>
+            <span className="h1-accent">per request.</span>
           </h1>
-          <p className="hero-sub">Strict or available, chosen per request. One cluster, no trade-off baked in.</p>
+          <p className="hero-sub">Strict or available, on the same cluster.</p>
           <div className="hero-ctas">
             <a className="btn btn-primary" href="#start" onClick={jump("start")}>
               Get started

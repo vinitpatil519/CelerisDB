@@ -42,14 +42,14 @@ export function App() {
       <Nav />
       <main ref={main}>
         <Hero />
+        <Benchmarks />
+        <BenchmarkDetails />
         <Band />
         <Cap />
         <Modes />
         <Architecture />
         <Partitions />
         <Features />
-        <Benchmarks />
-        <BenchmarkDetails />
         <Integrations />
         <Developers />
         <Proof />

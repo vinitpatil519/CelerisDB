@@ -35,7 +35,7 @@ db.put("carts/7", {**cart.value, "paid": True}, if_version=cart.version)`,
     id: "ai",
     title: "AI agents and LLM apps",
     logos: ["openai", "anthropic", "langchain", "huggingface"],
-    text: "Durable agent memory and state, next to any model provider.",
+    text: "Store agent memory and state.",
     file: "agent_memory.py",
     code: `# Works with any LLM SDK: CelerisDB stores the agent's state.
 memory = db.get(f"agents/{agent_id}/thread")
@@ -85,8 +85,8 @@ export function Integrations() {
   return (
     <section id="integrations" className="section" data-theme="light">
       <div className="container">
-        <SectionHead eyebrow="Integrations" title="Adopt it without rewiring your stack.">
-          <p>HTTPS and JSON, plus native SDKs. Nothing to rewire.</p>
+        <SectionHead eyebrow="Integrations" title="Works with your stack.">
+          <p>HTTPS and JSON, plus native SDKs.</p>
         </SectionHead>
 
         <div className="integ" data-reveal="fade">

@@ -71,7 +71,7 @@ export function Band() {
             </div>
           ))}
         </dl>
-        <p className="band-label">Works with the stack you already run</p>
+        <p className="band-label">Works with</p>
       </div>
       <Marquee ids={ROW_A} />
       <Marquee ids={ROW_B} reverse />

@@ -4,10 +4,10 @@ import { gsap, ScrollTrigger, useGSAP, useReducedMotion } from "../motion";
 
 const STEPS = [
   { title: "Healthy", text: "Majority commits. Every mode succeeds." },
-  { title: "Partition", text: "Region 2 is cut off. Something must give." },
-  { title: "Strict request", text: "No quorum here: refused, never wrong." },
-  { title: "Available request", text: "Accepted locally. The app keeps going." },
-  { title: "Heal", text: "Ordered through Raft. Conflicts kept, never lost." },
+  { title: "Partition", text: "Region 2 is cut off." },
+  { title: "Strict request", text: "No quorum. Request refused." },
+  { title: "Available request", text: "Accepted locally." },
+  { title: "Heal", text: "Writes ordered through Raft. Conflicts recorded." },
 ];
 
 /** The two-region diagram, drawn for one step of the story. */
@@ -211,7 +211,7 @@ export function Cap() {
           </p>
           <h2 data-reveal="lines">CAP, decided per request.</h2>
           <div className="section-lede" data-reveal="fade" data-delay="0.1">
-            <p>Partitions force a trade-off. Others make it once, for everything. CelerisDB makes it per request.</p>
+            <p>Pick consistency or availability for each request.</p>
           </div>
           <ul className="cap-points" data-reveal="fade" data-delay="0.15">
             <li>

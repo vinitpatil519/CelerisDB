@@ -154,7 +154,7 @@ const CARDS = [
   { title: "Live change streams", text: "Every commit, pushed over WebSockets.", viz: <StreamViz />, span: "wide" },
   { title: "Queries and indexes", text: "Filters, indexes, sort and totals, next to the data.", viz: <QueryViz />, span: "wide" },
   { title: "Exactly-once retries", text: "Mutation IDs dedupe every retry.", viz: <RetryViz />, span: "" },
-  { title: "Visible conflicts", text: "Losing writes are kept, not dropped.", viz: <ConflictViz />, span: "" },
+  { title: "Visible conflicts", text: "Losing writes are recorded.", viz: <ConflictViz />, span: "" },
   { title: "Self-healing", text: "Failover, rebalancing, anti-entropy.", viz: <HealViz />, span: "" },
   { title: "Security", text: "Scoped tokens, HTTPS, mutual TLS.", viz: <SecurityViz />, span: "" },
   { title: "Online backups", text: "Consistent snapshots, no pause.", viz: <BackupViz />, span: "" },
@@ -180,7 +180,7 @@ export function Features() {
   return (
     <section id="features" ref={ref} className="section alt" data-theme="light">
       <div className="container">
-        <SectionHead eyebrow="Features" title="Built for production." />
+        <SectionHead eyebrow="Features" title="What you get." />
         <div className="bento">
           {CARDS.map((c) => (
             <article key={c.title} className={`bento-card ${c.span}`}>

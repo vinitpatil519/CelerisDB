@@ -27,7 +27,7 @@ db = Client(["https://db.acme.dev"], token=TOKEN)
 try:
     db.put("orders/9281", {"status": "paid", "total": 120})
 except OutcomeUnknownError as e:
-    db.mutation_status(e.mutation_id)   # did it commit? ask, don't guess`,
+    db.mutation_status(e.mutation_id)   # check whether it committed`,
   },
   {
     id: "go",
@@ -64,7 +64,7 @@ curl -X POST https://db.acme.dev/v1/query \\
 
 const POINTS = [
   ["Safe retries", "Applied exactly once."],
-  ["Honest outcomes", "Unknown means unknown."],
+  ["Unknown outcomes", "Returned with an ID to check."],
   ["Read your writes", "Sessions across replicas."],
   ["Live data", "Change streams and a React hook."],
 ];
@@ -76,8 +76,8 @@ export function Developers() {
     <section id="developers" className="section alt" data-theme="light">
       <div className="container dev-grid">
         <div>
-          <SectionHead eyebrow="Developers" title="One API. Four SDKs. The same guarantees.">
-            <p>Identical failure semantics in every language.</p>
+          <SectionHead eyebrow="Developers" title="One API, four SDKs.">
+            <p>Same failure behavior in every language.</p>
           </SectionHead>
           <dl className="dev-points" data-reveal="fade">
             {POINTS.map(([t, d]) => (

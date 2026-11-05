@@ -19,7 +19,7 @@ const PROOF = [
   {
     kicker: "Durability",
     title: "Crash recovery",
-    text: "Killed mid-write, repeatedly. Nothing lost.",
+    text: "Processes killed mid-write, repeatedly.",
     metric: "zero acknowledged writes lost",
   },
   {
@@ -34,9 +34,7 @@ export function Proof() {
   return (
     <section id="proof" className="section alt" data-theme="light">
       <div className="container">
-        <SectionHead eyebrow="Reliability" title="Tested as if it will fail. Because it will.">
-          <p>Proven in the failure cases, in CI.</p>
-        </SectionHead>
+        <SectionHead eyebrow="Reliability" title="How it is tested." />
         <div className="proof">
           {PROOF.map((p, i) => (
             <article key={p.title} className="proof-card" data-reveal="fade" data-delay={String(i * 0.06)}>
@@ -60,11 +58,11 @@ export function Cta() {
       <div className="container cta-grid">
         <div>
           <p className="eyebrow" data-reveal="fade">
-            Get started
+            Install
           </p>
-          <h2 data-reveal="lines">Run a cluster before your coffee cools.</h2>
+          <h2 data-reveal="lines">Run CelerisDB.</h2>
           <p className="cta-sub" data-reveal="fade">
-            One binary, one image, or a three-node cluster.
+            Binary, Docker image, or three-node cluster.
           </p>
           <div className="hero-ctas" data-reveal="fade">
             <a className="btn btn-primary" href={REPO}>

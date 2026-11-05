@@ -38,8 +38,8 @@ export function Modes() {
   return (
     <section id="modes" className="section" data-theme="light">
       <div className="container">
-        <SectionHead eyebrow="Consistency" title="Five guarantees. One cluster.">
-          <p>Every request names its guarantee. Every response confirms it.</p>
+        <SectionHead eyebrow="Consistency" title="Five consistency modes.">
+          <p>Set per request.</p>
         </SectionHead>
 
         <div className="modes" data-reveal="fade">
@@ -77,8 +77,8 @@ export function Modes() {
                 </div>
               </dl>
               <div className="meters">
-                <Meter label="Freshness" value={mode.freshness} />
-                <Meter label="Serves during a partition" value={mode.partition} />
+                <Meter label="Consistency" value={mode.freshness} />
+                <Meter label="Availability" value={mode.partition} />
                 <Meter label="Speed" value={mode.speed} />
               </div>
             </div>

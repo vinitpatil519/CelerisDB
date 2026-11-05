@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 
-import { CodeBlock, SectionHead } from "../components/kit";
+import { SectionHead } from "../components/kit";
 import { REPO } from "../data/site";
 import data from "../data/benchmarks.json";
 import { gsap, prefersReducedMotion, ScrollTrigger, useGSAP } from "../motion";
@@ -22,10 +22,9 @@ const SYSTEMS: Record<string, { name: string; version: string; durability: strin
 };
 
 const WORKLOADS = [
-  { id: "a", title: "Update heavy", mix: "YCSB A: 50% reads, 50% updates" },
-  { id: "b", title: "Read mostly", mix: "YCSB B: 95% reads, 5% updates" },
-  { id: "c", title: "Read only", mix: "YCSB C: 100% reads" },
-  { id: "load", title: "Inserts", mix: "New keys only" },
+  { id: "a", title: "Mixed", mix: "50% reads, 50% updates" },
+  { id: "c", title: "Reads", mix: "100% reads" },
+  { id: "load", title: "Writes", mix: "New keys only" },
 ] as const;
 type WorkloadId = (typeof WORKLOADS)[number]["id"];
 
@@ -144,7 +143,7 @@ function Race() {
         </ol>
         <figure className="race">
           <figcaption className="race-head">
-            <span>Throughput, ops/s</span>
+            <span>Speed, ops/s</span>
             <span className="race-unit">32 clients · higher is better</span>
           </figcaption>
           <div className="race-rows" style={{ height: ROW * SYSTEM_IDS.length }}>
@@ -188,7 +187,7 @@ function RaceStack() {
           <p>{w.mix}</p>
           <figure className="race race-static">
             <figcaption className="race-head">
-              <span>Throughput, ops/s</span>
+              <span>Speed, ops/s</span>
               <span className="race-unit">higher is better</span>
             </figcaption>
             {RANK[w.id].map((id, k) => (
@@ -215,8 +214,8 @@ export function Benchmarks() {
   return (
     <section id="benchmarks" className="cap bench" data-theme="dark">
       <div className="container">
-        <SectionHead eyebrow="Benchmarks" title="Eight databases. One machine. Every write on disk.">
-          <p>CelerisDB placed third or fourth of eight in every workload.</p>
+        <SectionHead eyebrow="Benchmarks" title="CelerisDB vs seven databases.">
+          <p>Third or fourth of eight in every test.</p>
         </SectionHead>
       </div>
       {stacked ? <RaceStack /> : <Race />}
@@ -320,89 +319,21 @@ function Latency() {
   );
 }
 
-const SETUP = [
-  {
-    kicker: "Durability",
-    title: "Acknowledged means on disk",
-    text: "Each system ran in its durable mode. Cassandra needed a change: its default acknowledges before fsync, so we set batch.",
-    metric: "fsync before the reply",
-  },
-  {
-    kicker: "Load",
-    title: "Same keys, same bytes",
-    text: "Zipfian keys, YCSB's 0.99 skew. 1 KiB JSON values. 32 closed-loop clients. Missing keys count as errors.",
-    metric: "0 errors in 32 cells",
-  },
-  {
-    kicker: "Isolation",
-    title: "Same limits, one at a time",
-    text: "Fresh container and volume per system. 6 logical CPUs and 2 GiB for the database, 4 CPUs for the client.",
-    metric: "Ryzen 5 4600H · NVMe · ext4",
-  },
-  {
-    kicker: "Clients",
-    title: "Native protocol, except ours",
-    text: "Every system used its native client. CelerisDB only speaks HTTP and JSON, so it pays that cost here.",
-    metric: "bench/harness/drivers.go",
-  },
-];
-
-const REPRODUCE = `# needs Docker, Go and the image celeris:bench
-bench/run.sh --reps 1 --keys 2000 \\
-  --warmup 1s --duration 2s \\
-  --cells a:32,b:32,c:32,load:32 --out raw.jsonl`;
-
 export function BenchmarkDetails() {
   return (
     <section id="latency" className="section alt" data-theme="light">
       <div className="container">
-        <SectionHead eyebrow="Latency" title="The typical request, and the slow one.">
-          <p>Sorted by p99. Switch workloads and watch the order change.</p>
-        </SectionHead>
+        <SectionHead eyebrow="Latency" title="Latency, p50 and p99." />
         <Latency />
 
-        <div className="proof bench-setup">
-          {SETUP.map((s, i) => (
-            <article key={s.title} className="proof-card" data-reveal="fade" data-delay={String(i * 0.06)}>
-              <span className="eyebrow small">{s.kicker}</span>
-              <h3>{s.title}</h3>
-              <p>{s.text}</p>
-              <span className="proof-metric">{s.metric}</span>
-            </article>
-          ))}
-        </div>
+        <p className="bench-method" data-reveal="fade">
+          One node each, fsync on. 1 KiB values, 32 clients. 2,000 keys, 2 seconds per test, one pass.{" "}
+          <a href={`${REPO}/tree/main/bench`}>Harness</a> · <a href={`${REPO}/blob/main/bench/results/2026-11-05-quick/raw.jsonl`}>Raw results</a>
+        </p>
 
-        <div className="bench-limits" data-reveal="fade">
-          <div>
-            <h3>What this does not show</h3>
-            <ul>
-              <li>
-                <b>Clusters.</b> Every system ran as one node, with no replication or failover. CockroachDB, Cassandra and
-                etcd are built for clusters and pay for that here.
-              </li>
-              <li>
-                <b>Per-request consistency.</b> One node has one replica, so CelerisDB&apos;s modes all behave the same.
-              </li>
-              <li>
-                <b>Disk-bound reads.</b> 2,000 keys fit in memory, so read workloads barely touch the disk.
-              </li>
-              <li>
-                <b>Stability.</b> Two seconds and one pass cannot show compaction stalls or run-to-run variation.
-              </li>
-            </ul>
-          </div>
-          <div>
-            <h3>Run it yourself</h3>
-            <CodeBlock code={REPRODUCE} label="terminal" />
-            <p className="bench-links">
-              <a href={`${REPO}/tree/main/bench`}>Harness</a>
-              <a href={`${REPO}/blob/main/bench/results/2026-11-05-quick/raw.jsonl`}>Raw results</a>
-            </p>
-          </div>
-        </div>
 
         <details className="bench-table" data-reveal="fade" onToggle={() => ScrollTrigger.refresh()}>
-          <summary>Every number, as a table</summary>
+          <summary>All numbers</summary>
           <div className="bench-table-scroll">
             <table>
               <thead>

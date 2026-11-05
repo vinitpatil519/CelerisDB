@@ -110,11 +110,11 @@ export function SectionHead({
 }
 
 const NAV = [
+  { id: "benchmarks", label: "Benchmarks" },
   { id: "cap", label: "CAP" },
   { id: "modes", label: "Consistency" },
   { id: "architecture", label: "Architecture" },
   { id: "features", label: "Features" },
-  { id: "benchmarks", label: "Benchmarks" },
   { id: "integrations", label: "Integrations" },
   { id: "developers", label: "Developers" },
 ];

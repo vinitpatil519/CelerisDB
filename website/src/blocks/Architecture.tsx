@@ -7,21 +7,21 @@ const LAYERS = [
   {
     name: "API",
     detail: "HTTP · JSON · WebSocket",
-    title: "One plain HTTP API",
+    title: "HTTP API",
     text: "HTTPS, scoped tokens, WebSocket streams, Prometheus metrics.",
     side: [] as string[],
   },
   {
     name: "Query engine",
     detail: "filters · indexes · sort · totals",
-    title: "Queries run where the data lives",
+    title: "Queries",
     text: "Filters, indexes, sorting and aggregates pushed to each replica set.",
     side: [],
   },
   {
     name: "Router",
     detail: "key → partition → replica set",
-    title: "Every key has an address",
+    title: "Routing",
     text: "Key → partition → replica set. Epochs fence stale maps.",
     side: ["control"],
   },
@@ -35,7 +35,7 @@ const LAYERS = [
   {
     name: "Storage engine",
     detail: "WAL · memtable · SSTables",
-    title: "A storage engine built for this",
+    title: "Storage engine",
     text: "LSM engine in Rust: group-commit WAL, SSTables, Bloom filters, atomic indexes.",
     side: [],
   },
@@ -80,8 +80,8 @@ export function Architecture() {
   return (
     <section id="architecture" ref={ref} className="section alt" data-theme="light">
       <div className="container">
-        <SectionHead eyebrow="Architecture" title="Inside a node, layer by layer.">
-          <p>One binary per machine. Five layers, one job each.</p>
+        <SectionHead eyebrow="Architecture" title="Inside a node.">
+          <p>One binary per machine.</p>
         </SectionHead>
 
         <div className="arch">
