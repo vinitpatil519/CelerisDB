@@ -11,6 +11,7 @@ import { Hero } from "./blocks/Hero";
 import { Integrations } from "./blocks/Integrations";
 import { Modes } from "./blocks/Modes";
 import { Partitions } from "./blocks/Partitions";
+import { AgentView, AudienceDock, AudienceFloat, AudienceProvider } from "./components/Audience";
 import { Footer, Nav } from "./components/kit";
 import { revealIn, ScrollTrigger, startSmoothScroll, useGSAP } from "./motion";
 
@@ -35,7 +36,7 @@ export function App() {
   useGSAP(() => main.current && revealIn(main.current), { scope: main });
 
   return (
-    <>
+    <AudienceProvider>
       <a className="skip" href="#start">
         Skip to install
       </a>
@@ -56,6 +57,9 @@ export function App() {
         <Cta />
       </main>
       <Footer />
-    </>
+      <AgentView />
+      <AudienceDock />
+      <AudienceFloat />
+    </AudienceProvider>
   );
 }

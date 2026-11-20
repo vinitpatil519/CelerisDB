@@ -1,0 +1,9 @@
+# CelerisDB
+
+> Self-hosted distributed JSON database. Choose consistency per request (strict, session, bounded, available, eventual). Raft per replica set. SDKs for TypeScript, Python, Go and Rust.
+
+Coding agents: read the full guide before writing code.
+
+- [Guide for coding agents](https://celerisdb.runs-at.dev/agents.md): install, consistency modes, HTTP API, errors, SDKs, data modeling patterns, checklist
+- [Human docs](https://celerisdb.runs-at.dev/docs/)
+- [Repository](https://github.com/vinitpatil519/CelerisDB)
